@@ -1,0 +1,65 @@
+package odbc
+
+import (
+	"context"
+	"database/sql/driver"
+	"errors"
+)
+
+// Connector implements driver.Connector for efficient connection pooling
+type Connector struct {
+	dsn    string
+	driver *Driver
+}
+
+// Connect establishes a new connection to the database
+func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
+	// Allocate environment handle
+	var env SQLHENV
+	ret := AllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, (*SQLHANDLE)(&env))
+	if !IsSuccess(ret) {
+		return nil, errors.New("failed to allocate ODBC environment handle")
+	}
+
+	// Set ODBC version to 3.x
+	ret = SetEnvAttr(env, SQL_ATTR_ODBC_VERSION, uintptr(SQL_OV_ODBC3), 0)
+	if !IsSuccess(ret) {
+		FreeHandle(SQL_HANDLE_ENV, SQLHANDLE(env))
+		return nil, NewError(SQL_HANDLE_ENV, SQLHANDLE(env))
+	}
+
+	// Allocate connection handle
+	var dbc SQLHDBC
+	ret = AllocHandle(SQL_HANDLE_DBC, SQLHANDLE(env), (*SQLHANDLE)(&dbc))
+	if !IsSuccess(ret) {
+		err := NewError(SQL_HANDLE_ENV, SQLHANDLE(env))
+		FreeHandle(SQL_HANDLE_ENV, SQLHANDLE(env))
+		return nil, err
+	}
+
+	// Connect using the connection string
+	outConnStr := make([]byte, 1024)
+	_, ret = DriverConnect(dbc, 0, c.dsn, outConnStr, SQL_DRIVER_NOPROMPT)
+	if !IsSuccess(ret) {
+		err := NewError(SQL_HANDLE_DBC, SQLHANDLE(dbc))
+		FreeHandle(SQL_HANDLE_DBC, SQLHANDLE(dbc))
+		FreeHandle(SQL_HANDLE_ENV, SQLHANDLE(env))
+		return nil, err
+	}
+
+	// Create and return the connection
+	conn := &Conn{
+		env: env,
+		dbc: dbc,
+	}
+
+	return conn, nil
+}
+
+// Driver returns the underlying Driver
+func (c *Connector) Driver() driver.Driver {
+	return c.driver
+}
+
+// Ensure Connector implements driver.Connector
+var _ driver.Connector = (*Connector)(nil)
