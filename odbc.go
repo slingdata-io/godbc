@@ -82,7 +82,9 @@ func getLibraryPath() string {
 func initODBC() error {
 	initOnce.Do(func() {
 		libPath := getLibraryPath()
-		odbcLib, initErr = purego.Dlopen(libPath, purego.RTLD_NOW|purego.RTLD_GLOBAL)
+		
+		// Use platform-specific library loading (implemented in odbc_windows.go and odbc_unix.go)
+		odbcLib, initErr = loadODBCLibrary(libPath)
 		if initErr != nil {
 			return
 		}
