@@ -180,18 +180,18 @@ func getDDLTemplates(dbType DBType, tableName string) DDLTemplates {
 
 func main() {
 	// Parse command line flags
-	dsn := flag.String("dsn", "", "ODBC connection string (required)")
+	dsn := flag.String("conn-string", "", "ODBC connection string (required)")
 	schema := flag.String("schema", "", "Schema name for the test table (optional)")
 	flag.Parse()
 
 	if *dsn == "" {
-		fmt.Println("Usage: basic -dsn <connection-string> [-schema <schema-name>]")
+		fmt.Println("Usage: basic -conn-string <connection-string> [-schema <schema-name>]")
 		fmt.Println()
 		fmt.Println("Examples:")
-		fmt.Println("  basic -dsn \"DSN=mydsn;UID=user;PWD=password\"")
-		fmt.Println("  basic -dsn \"Driver={PostgreSQL Unicode};Server=localhost;Database=test;UID=user;PWD=pass\" -schema public")
-		fmt.Println("  basic -dsn \"Driver={SQL Server};Server=localhost;Database=test;UID=sa;PWD=pass\" -schema dbo")
-		fmt.Println("  basic -dsn \"Driver={MySQL ODBC 8.0 Unicode Driver};Server=localhost;Database=test;UID=user;PWD=pass\"")
+		fmt.Println("  basic -conn-string \"DSN=mydsn;UID=user;PWD=password\"")
+		fmt.Println("  basic -conn-string \"Driver={PostgreSQL Unicode};Server=localhost;Database=test;UID=user;PWD=pass\" -schema public")
+		fmt.Println("  basic -conn-string \"Driver={SQL Server};Server=localhost;Database=test;UID=sa;PWD=pass\" -schema dbo")
+		fmt.Println("  basic -conn-string \"Driver={MySQL ODBC 8.0 Unicode Driver};Server=localhost;Database=test;UID=user;PWD=pass\"")
 		os.Exit(1)
 	}
 

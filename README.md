@@ -133,23 +133,23 @@ go build ./examples/basic/
 ### Usage
 
 ```bash
-./basic -dsn <connection-string> [-schema <schema-name>]
+./basic -conn-string <connection-string> [-schema <schema-name>]
 ```
 
 ### Examples
 
 ```bash
 # SQL Server
-./basic -dsn "Driver={ODBC Driver 18 for SQL Server};Server=localhost;Database=master;UID=sa;PWD=password;Encrypt=no" -schema dbo
+./basic -conn-string "Driver={ODBC Driver 18 for SQL Server};Server=localhost;Database=master;UID=sa;PWD=password;Encrypt=no" -schema dbo
 
 # PostgreSQL
-./basic -dsn "Driver={PostgreSQL Unicode};Server=localhost;Port=5432;Database=postgres;UID=postgres;PWD=password" -schema public
+./basic -conn-string "Driver={PostgreSQL Unicode};Server=localhost;Port=5432;Database=postgres;UID=postgres;PWD=password" -schema public
 
 # MySQL
-./basic -dsn "Driver={MySQL ODBC 8.0 Unicode Driver};Server=localhost;Database=test;UID=root;PWD=password"
+./basic -conn-string "Driver={MySQL ODBC 8.0 Unicode Driver};Server=localhost;Database=test;UID=root;PWD=password"
 
 # SQLite
-./basic -dsn "Driver={SQLite3 ODBC Driver};Database=/tmp/test.db"
+./basic -conn-string "Driver={SQLite3 ODBC Driver};Database=/tmp/test.db"
 ```
 
 ### What It Tests
