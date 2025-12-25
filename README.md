@@ -96,9 +96,35 @@ func main() {
 | `bool` | BIT |
 | `int8`, `int16`, `int32`, `int64` | TINYINT, SMALLINT, INTEGER, BIGINT |
 | `float32`, `float64` | REAL, DOUBLE |
-| `string` | CHAR, VARCHAR, TEXT |
+| `string` | CHAR, VARCHAR, TEXT, DECIMAL, NUMERIC |
 | `[]byte` | BINARY, VARBINARY, BLOB |
 | `time.Time` | DATE, TIME, TIMESTAMP |
+
+## Decimal Precision
+
+DECIMAL and NUMERIC columns are returned as `string` to preserve full precision (avoiding float64 rounding errors). Use the `DecimalSize()` method on column types to get precision and scale metadata:
+
+```go
+rows, _ := db.Query("SELECT price FROM products")
+defer rows.Close()
+
+cols, _ := rows.ColumnTypes()
+for _, col := range cols {
+    if prec, scale, ok := col.DecimalSize(); ok {
+        fmt.Printf("Column %s: DECIMAL(%d,%d)\n", col.Name(), prec, scale)
+    }
+}
+```
+
+For arbitrary-precision arithmetic, use a decimal library like [shopspring/decimal](https://github.com/shopspring/decimal):
+
+```go
+import "github.com/shopspring/decimal"
+
+var priceStr string
+rows.Scan(&priceStr)
+price, _ := decimal.NewFromString(priceStr)
+```
 
 ## Transactions
 
@@ -155,10 +181,11 @@ go build ./examples/basic/
 ### What It Tests
 
 - Connection and ping
-- Table creation with various data types (INTEGER, VARCHAR, FLOAT, BOOLEAN/BIT, TIMESTAMP, BINARY)
+- Table creation with various data types (INTEGER, VARCHAR, FLOAT, BOOLEAN/BIT, TIMESTAMP, BINARY, DECIMAL)
 - Prepared statement parameter binding
 - Data insertion and retrieval
 - Value equality validation (verifies inserted values match retrieved values)
+- Decimal precision/scale metadata (validates `ColumnTypePrecisionScale` returns correct values)
 - Transaction rollback (inserts row, rolls back, verifies not persisted)
 - Transaction commit (inserts row, commits, verifies persisted)
 - Table cleanup

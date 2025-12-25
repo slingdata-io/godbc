@@ -14,6 +14,7 @@ type Rows struct {
 	columns   []string
 	colTypes  []SQLSMALLINT
 	colSizes  []SQLULEN
+	decDigits []SQLSMALLINT // decimal digits (scale) for NUMERIC/DECIMAL types
 	nullable  []SQLSMALLINT
 	closed    bool
 	closeStmt bool // Whether to close the statement when rows are closed
@@ -39,11 +40,12 @@ func newRows(stmt *Stmt, closeStmt bool) (*Rows, error) {
 	columns := make([]string, numCols)
 	colTypes := make([]SQLSMALLINT, numCols)
 	colSizes := make([]SQLULEN, numCols)
+	decDigits := make([]SQLSMALLINT, numCols)
 	nullable := make([]SQLSMALLINT, numCols)
 
 	colName := make([]byte, 256)
 	for i := SQLUSMALLINT(1); i <= SQLUSMALLINT(numCols); i++ {
-		nameLen, dataType, colSize, _, nullableVal, ret := DescribeCol(stmt.stmt, i, colName)
+		nameLen, dataType, colSize, decDigitsVal, nullableVal, ret := DescribeCol(stmt.stmt, i, colName)
 		if !IsSuccess(ret) {
 			return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(stmt.stmt))
 		}
@@ -51,6 +53,7 @@ func newRows(stmt *Stmt, closeStmt bool) (*Rows, error) {
 		columns[i-1] = string(colName[:nameLen])
 		colTypes[i-1] = dataType
 		colSizes[i-1] = colSize
+		decDigits[i-1] = decDigitsVal
 		nullable[i-1] = nullableVal
 	}
 
@@ -59,6 +62,7 @@ func newRows(stmt *Stmt, closeStmt bool) (*Rows, error) {
 		columns:   columns,
 		colTypes:  colTypes,
 		colSizes:  colSizes,
+		decDigits: decDigits,
 		nullable:  nullable,
 		closeStmt: closeStmt,
 	}, nil
@@ -423,8 +427,10 @@ func (r *Rows) ColumnTypeScanType(index int) reflect.Type {
 		return reflect.TypeOf(int64(0))
 	case SQL_REAL:
 		return reflect.TypeOf(float32(0))
-	case SQL_FLOAT, SQL_DOUBLE, SQL_NUMERIC, SQL_DECIMAL:
+	case SQL_FLOAT, SQL_DOUBLE:
 		return reflect.TypeOf(float64(0))
+	case SQL_NUMERIC, SQL_DECIMAL:
+		return reflect.TypeOf("") // String preserves decimal precision
 	case SQL_CHAR, SQL_VARCHAR, SQL_LONGVARCHAR, SQL_WCHAR, SQL_WVARCHAR, SQL_WLONGVARCHAR:
 		return reflect.TypeOf("")
 	case SQL_BINARY, SQL_VARBINARY, SQL_LONGVARBINARY:
@@ -523,6 +529,20 @@ func (r *Rows) ColumnTypeNullable(index int) (nullable, ok bool) {
 	}
 }
 
+// ColumnTypePrecisionScale returns the precision and scale for NUMERIC/DECIMAL types
+func (r *Rows) ColumnTypePrecisionScale(index int) (precision, scale int64, ok bool) {
+	if index < 0 || index >= len(r.colTypes) {
+		return 0, 0, false
+	}
+	switch r.colTypes[index] {
+	case SQL_NUMERIC, SQL_DECIMAL:
+		// colSize = precision (total digits), decDigits = scale (digits after decimal)
+		return int64(r.colSizes[index]), int64(r.decDigits[index]), true
+	default:
+		return 0, 0, false
+	}
+}
+
 // HasNextResultSet checks if there are more result sets
 func (r *Rows) HasNextResultSet() bool {
 	return MoreResults(r.stmt.stmt) == SQL_SUCCESS
@@ -548,11 +568,12 @@ func (r *Rows) NextResultSet() error {
 	columns := make([]string, numCols)
 	colTypes := make([]SQLSMALLINT, numCols)
 	colSizes := make([]SQLULEN, numCols)
+	decDigits := make([]SQLSMALLINT, numCols)
 	nullable := make([]SQLSMALLINT, numCols)
 
 	colName := make([]byte, 256)
 	for i := SQLUSMALLINT(1); i <= SQLUSMALLINT(numCols); i++ {
-		nameLen, dataType, colSize, _, nullableVal, ret := DescribeCol(r.stmt.stmt, i, colName)
+		nameLen, dataType, colSize, decDigitsVal, nullableVal, ret := DescribeCol(r.stmt.stmt, i, colName)
 		if !IsSuccess(ret) {
 			return NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 		}
@@ -560,12 +581,14 @@ func (r *Rows) NextResultSet() error {
 		columns[i-1] = string(colName[:nameLen])
 		colTypes[i-1] = dataType
 		colSizes[i-1] = colSize
+		decDigits[i-1] = decDigitsVal
 		nullable[i-1] = nullableVal
 	}
 
 	r.columns = columns
 	r.colTypes = colTypes
 	r.colSizes = colSizes
+	r.decDigits = decDigits
 	r.nullable = nullable
 
 	return nil
@@ -578,5 +601,6 @@ var (
 	_ driver.RowsColumnTypeDatabaseTypeName = (*Rows)(nil)
 	_ driver.RowsColumnTypeLength           = (*Rows)(nil)
 	_ driver.RowsColumnTypeNullable         = (*Rows)(nil)
+	_ driver.RowsColumnTypePrecisionScale   = (*Rows)(nil)
 	_ driver.RowsNextResultSet              = (*Rows)(nil)
 )

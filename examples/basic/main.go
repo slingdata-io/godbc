@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -94,6 +95,7 @@ func getDDLTemplates(dbType DBType, tableName string) DDLTemplates {
 					active BIT,
 					created_at DATETIME2,
 					data VARBINARY(100),
+					price DECIMAL(10,2),
 					PRIMARY KEY (id)
 				)`, tableName),
 			DropTable:  fmt.Sprintf("DROP TABLE %s", tableName),
@@ -109,6 +111,7 @@ func getDDLTemplates(dbType DBType, tableName string) DDLTemplates {
 					active BOOLEAN,
 					created_at TIMESTAMP,
 					data BYTEA,
+					price DECIMAL(10,2),
 					PRIMARY KEY (id)
 				)`, tableName),
 			DropTable:  fmt.Sprintf("DROP TABLE IF EXISTS %s", tableName),
@@ -124,6 +127,7 @@ func getDDLTemplates(dbType DBType, tableName string) DDLTemplates {
 					active TINYINT(1),
 					created_at DATETIME(3),
 					data VARBINARY(100),
+					price DECIMAL(10,2),
 					PRIMARY KEY (id)
 				)`, tableName),
 			DropTable:  fmt.Sprintf("DROP TABLE IF EXISTS %s", tableName),
@@ -139,6 +143,7 @@ func getDDLTemplates(dbType DBType, tableName string) DDLTemplates {
 					active INTEGER,
 					created_at TEXT,
 					data BLOB,
+					price DECIMAL(10,2),
 					PRIMARY KEY (id)
 				)`, tableName),
 			DropTable:  fmt.Sprintf("DROP TABLE IF EXISTS %s", tableName),
@@ -154,6 +159,7 @@ func getDDLTemplates(dbType DBType, tableName string) DDLTemplates {
 					active NUMBER(1),
 					created_at TIMESTAMP,
 					data RAW(100),
+					price NUMBER(10,2),
 					PRIMARY KEY (id)
 				)`, tableName),
 			DropTable:  fmt.Sprintf("DROP TABLE %s", tableName),
@@ -170,6 +176,7 @@ func getDDLTemplates(dbType DBType, tableName string) DDLTemplates {
 					active SMALLINT,
 					created_at TIMESTAMP,
 					data VARBINARY(100),
+					price DECIMAL(10,2),
 					PRIMARY KEY (id)
 				)`, tableName),
 			DropTable:  fmt.Sprintf("DROP TABLE %s", tableName),
@@ -251,13 +258,14 @@ func runTest(db *sql.DB, _ DBType, tableName string, ddl DDLTemplates) error {
 		active    bool
 		createdAt time.Time
 		data      []byte
+		price     string // DECIMAL as string to preserve precision
 	}{
-		{1, "Alice", 123.45, true, time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC), []byte{0x01, 0x02, 0x03}},
-		{2, "Bob", 678.90, false, time.Date(2024, 2, 20, 14, 45, 0, 0, time.UTC), []byte{0x04, 0x05, 0x06}},
-		{3, "Charlie", 0.0, true, time.Date(2024, 3, 25, 9, 0, 0, 0, time.UTC), nil},
+		{1, "Alice", 123.45, true, time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC), []byte{0x01, 0x02, 0x03}, "12345.67"},
+		{2, "Bob", 678.90, false, time.Date(2024, 2, 20, 14, 45, 0, 0, time.UTC), []byte{0x04, 0x05, 0x06}, "9999.99"},
+		{3, "Charlie", 0.0, true, time.Date(2024, 3, 25, 9, 0, 0, 0, time.UTC), nil, "0.01"},
 	}
 
-	insertSQL := fmt.Sprintf("INSERT INTO %s (id, name, value, active, created_at, data) VALUES (?, ?, ?, ?, ?, ?)", tableName)
+	insertSQL := fmt.Sprintf("INSERT INTO %s (id, name, value, active, created_at, data, price) VALUES (?, ?, ?, ?, ?, ?, ?)", tableName)
 	stmt, err := db.Prepare(insertSQL)
 	if err != nil {
 		return fmt.Errorf("failed to prepare insert: %w", err)
@@ -265,7 +273,7 @@ func runTest(db *sql.DB, _ DBType, tableName string, ddl DDLTemplates) error {
 	defer stmt.Close()
 
 	for _, row := range testRows {
-		result, err := stmt.Exec(row.id, row.name, row.value, row.active, row.createdAt, row.data)
+		result, err := stmt.Exec(row.id, row.name, row.value, row.active, row.createdAt, row.data, row.price)
 		if err != nil {
 			return fmt.Errorf("failed to insert row %d: %w", row.id, err)
 		}
@@ -275,7 +283,7 @@ func runTest(db *sql.DB, _ DBType, tableName string, ddl DDLTemplates) error {
 
 	// Select and validate rows
 	log.Println("Selecting rows back...")
-	selectSQL := fmt.Sprintf("SELECT id, name, value, active, created_at, data FROM %s ORDER BY id", tableName)
+	selectSQL := fmt.Sprintf("SELECT id, name, value, active, created_at, data, price FROM %s ORDER BY id", tableName)
 	rows, err := db.Query(selectSQL)
 	if err != nil {
 		return fmt.Errorf("failed to query rows: %w", err)
@@ -289,6 +297,28 @@ func runTest(db *sql.DB, _ DBType, tableName string, ddl DDLTemplates) error {
 	}
 	log.Printf("Columns: %v", columns)
 
+	// Validate DECIMAL precision/scale metadata
+	colTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return fmt.Errorf("failed to get column types: %w", err)
+	}
+	for _, col := range colTypes {
+		if col.Name() == "price" {
+			prec, scale, ok := col.DecimalSize()
+			if !ok {
+				return fmt.Errorf("price column: DecimalSize() returned ok=false, expected ok=true")
+			}
+			log.Printf("  Column 'price': DECIMAL(%d,%d)", prec, scale)
+			if prec != 10 {
+				return fmt.Errorf("price column: expected precision=10, got %d", prec)
+			}
+			if scale != 2 {
+				return fmt.Errorf("price column: expected scale=2, got %d", scale)
+			}
+			log.Println("  ✓ DECIMAL precision/scale metadata validated")
+		}
+	}
+
 	// Fetch and validate rows
 	rowCount := 0
 	for rows.Next() {
@@ -298,13 +328,14 @@ func runTest(db *sql.DB, _ DBType, tableName string, ddl DDLTemplates) error {
 		var active sql.NullBool
 		var createdAt sql.NullTime
 		var data []byte
+		var price sql.NullString // DECIMAL scanned as string to preserve precision
 
-		if err := rows.Scan(&id, &name, &value, &active, &createdAt, &data); err != nil {
+		if err := rows.Scan(&id, &name, &value, &active, &createdAt, &data, &price); err != nil {
 			return fmt.Errorf("failed to scan row: %w", err)
 		}
 
-		log.Printf("  Row %d: id=%d, name=%v, value=%v, active=%v, created_at=%v, data=%v",
-			rowCount+1, id, name.String, value.Float64, active.Bool, createdAt.Time, data)
+		log.Printf("  Row %d: id=%d, name=%v, value=%v, active=%v, created_at=%v, data=%v, price=%v",
+			rowCount+1, id, name.String, value.Float64, active.Bool, createdAt.Time, data, price.String)
 
 		// Validate against expected values
 		expected := testRows[rowCount]
@@ -342,6 +373,13 @@ func runTest(db *sql.DB, _ DBType, tableName string, ddl DDLTemplates) error {
 					return fmt.Errorf("row %d: expected data[%d]=%d, got %d", rowCount+1, i, expected.data[i], data[i])
 				}
 			}
+		}
+		// Compare DECIMAL price - parse as float for comparison since string format may vary
+		// (e.g., ".01" vs "0.01" depending on database)
+		expectedPrice, _ := strconv.ParseFloat(expected.price, 64)
+		gotPrice, _ := strconv.ParseFloat(price.String, 64)
+		if expectedPrice != gotPrice {
+			return fmt.Errorf("row %d: expected price=%q (%v), got %q (%v)", rowCount+1, expected.price, expectedPrice, price.String, gotPrice)
 		}
 
 		log.Printf("  Row %d: ✓ all values match expected", rowCount+1)
