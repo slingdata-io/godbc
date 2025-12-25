@@ -90,7 +90,7 @@ func getDDLTemplates(dbType DBType, tableName string) DDLTemplates {
 			CreateTable: fmt.Sprintf(`
 				CREATE TABLE %s (
 					id INTEGER NOT NULL,
-					name VARCHAR(100),
+					name NVARCHAR(100),
 					value FLOAT,
 					active BIT,
 					created_at DATETIME2,
@@ -122,7 +122,7 @@ func getDDLTemplates(dbType DBType, tableName string) DDLTemplates {
 			CreateTable: fmt.Sprintf(`
 				CREATE TABLE %s (
 					id INTEGER NOT NULL,
-					name VARCHAR(100),
+					name VARCHAR(100) CHARACTER SET utf8mb4,
 					value DOUBLE,
 					active TINYINT(1),
 					created_at DATETIME(3),
@@ -154,7 +154,7 @@ func getDDLTemplates(dbType DBType, tableName string) DDLTemplates {
 			CreateTable: fmt.Sprintf(`
 				CREATE TABLE %s (
 					id NUMBER(10) NOT NULL,
-					name VARCHAR2(100),
+					name NVARCHAR2(100),
 					value BINARY_DOUBLE,
 					active NUMBER(1),
 					created_at TIMESTAMP,
@@ -171,7 +171,7 @@ func getDDLTemplates(dbType DBType, tableName string) DDLTemplates {
 			CreateTable: fmt.Sprintf(`
 				CREATE TABLE %s (
 					id INTEGER NOT NULL,
-					name VARCHAR(100),
+					name NVARCHAR(100),
 					value FLOAT,
 					active SMALLINT,
 					created_at TIMESTAMP,
@@ -263,6 +263,9 @@ func runTest(db *sql.DB, dbType DBType, tableName string, ddl DDLTemplates) erro
 		{1, "Alice", 123.45, true, time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC), []byte{0x01, 0x02, 0x03}, "12345.67"},
 		{2, "Bob", 678.90, false, time.Date(2024, 2, 20, 14, 45, 0, 0, time.UTC), []byte{0x04, 0x05, 0x06}, "9999.99"},
 		{3, "Charlie", 0.0, true, time.Date(2024, 3, 25, 9, 0, 0, 0, time.UTC), nil, "0.01"},
+		{4, "中文测试", 100.00, true, time.Date(2024, 4, 1, 12, 0, 0, 0, time.UTC), []byte{0x07, 0x08}, "888.88"},
+		{5, "Emoji🎉🚀💯🔥", 200.00, false, time.Date(2024, 5, 15, 18, 30, 0, 0, time.UTC), []byte{0x09, 0x0A}, "999.00"},
+		{6, "Ωמאבჯ∞≠∑∏", 300.00, true, time.Date(2024, 6, 30, 6, 15, 0, 0, time.UTC), nil, "42.42"},
 	}
 
 	insertSQL := fmt.Sprintf("INSERT INTO %s (id, name, value, active, created_at, data, price) VALUES (?, ?, ?, ?, ?, ?, ?)", tableName)
@@ -438,7 +441,7 @@ func runTest(db *sql.DB, dbType DBType, tableName string, ddl DDLTemplates) erro
 
 	// Insert a row in transaction
 	_, err = tx.Exec(fmt.Sprintf("INSERT INTO %s (id, name, value, active, created_at) VALUES (?, ?, ?, ?, ?)", tableName),
-		4, "David", 999.99, true, time.Now())
+		7, "David", 999.99, true, time.Now())
 	if err != nil {
 		tx.Rollback()
 		return fmt.Errorf("failed to insert in transaction: %w", err)
@@ -469,7 +472,7 @@ func runTest(db *sql.DB, dbType DBType, tableName string, ddl DDLTemplates) erro
 	}
 
 	_, err = tx.Exec(fmt.Sprintf("INSERT INTO %s (id, name, value, active, created_at) VALUES (?, ?, ?, ?, ?)", tableName),
-		5, "Eve", 111.11, false, time.Now())
+		8, "Eve", 111.11, false, time.Now())
 	if err != nil {
 		tx.Rollback()
 		return fmt.Errorf("failed to insert in transaction: %w", err)

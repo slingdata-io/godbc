@@ -183,8 +183,11 @@ func convertToODBC(value interface{}) (interface{}, SQLSMALLINT, SQLSMALLINT, SQ
 		return val, SQL_C_DOUBLE, SQL_DOUBLE, 15, 0, 8, nil
 
 	case string:
-		buf := append([]byte(v), 0) // Null-terminated
-		return buf, SQL_C_CHAR, SQL_VARCHAR, SQLULEN(len(v)), 0, SQLLEN(len(v)), nil
+		// Use UTF-16 for proper Unicode support across all databases
+		utf16Buf := stringToUTF16(v)
+		charCount := len(utf16Buf) - 1 // Exclude null terminator
+		bufBytes := charCount * 2      // 2 bytes per UTF-16 code unit
+		return utf16Buf, SQL_C_WCHAR, SQL_WVARCHAR, SQLULEN(charCount), 0, SQLLEN(bufBytes), nil
 
 	case []byte:
 		if len(v) == 0 {
@@ -509,32 +512,51 @@ func AllocateColumnArray(values []interface{}, numRows int) (*ColumnBuffer, erro
 		buf.ElemSize = 4
 
 	case string:
-		// Find max length needed
-		maxLen := 0
+		// Find max character count needed (for UTF-16)
+		maxCharCount := 0
 		for _, v := range values {
-			if s, ok := v.(string); ok && len(s) > maxLen {
-				maxLen = len(s)
+			if s, ok := v.(string); ok {
+				charCount := len([]rune(s))
+				// Account for surrogate pairs (chars > U+FFFF need 2 UTF-16 code units)
+				for _, r := range s {
+					if r > 0xFFFF {
+						charCount++ // Extra code unit for surrogate pair
+					}
+				}
+				if charCount > maxCharCount {
+					maxCharCount = charCount
+				}
 			}
 		}
-		if maxLen == 0 {
-			maxLen = 255
+		if maxCharCount == 0 {
+			maxCharCount = 255
 		}
-		elemSize := maxLen + 1 // +1 for null terminator
+		// Each element: (maxCharCount + 1) UTF-16 code units * 2 bytes each
+		elemSize := (maxCharCount + 1) * 2 // +1 for null terminator
 
 		data := make([]byte, numRows*elemSize)
 		for i, v := range values {
 			if v == nil {
 				buf.Lengths[i] = SQL_NULL_DATA
 			} else if s, ok := v.(string); ok {
+				utf16Data := stringToUTF16(s)
 				offset := i * elemSize
-				copy(data[offset:], s)
-				buf.Lengths[i] = SQLLEN(len(s))
+				// Copy UTF-16 data as bytes (little-endian)
+				for j, u := range utf16Data {
+					byteOffset := offset + j*2
+					if byteOffset+1 < len(data) {
+						data[byteOffset] = byte(u)
+						data[byteOffset+1] = byte(u >> 8)
+					}
+				}
+				// Length is byte count excluding null terminator
+				buf.Lengths[i] = SQLLEN((len(utf16Data) - 1) * 2)
 			}
 		}
 		buf.Data = data
-		buf.CType = SQL_C_CHAR
-		buf.SQLType = SQL_VARCHAR
-		buf.ColSize = SQLULEN(maxLen)
+		buf.CType = SQL_C_WCHAR
+		buf.SQLType = SQL_WVARCHAR
+		buf.ColSize = SQLULEN(maxCharCount)
 		buf.ElemSize = elemSize
 
 	case []byte:
