@@ -146,6 +146,115 @@ if err != nil {
 }
 ```
 
+## Named Parameters
+
+The driver supports named parameters in addition to positional `?` placeholders. Named parameters are automatically converted to positional placeholders before execution.
+
+Supported styles:
+- `:name` - Oracle/PostgreSQL style
+- `@name` - SQL Server style
+- `$name` - PostgreSQL style (not `$1` which is positional)
+
+```go
+// Using named parameters
+rows, err := db.Query(
+    "SELECT * FROM users WHERE name = :name AND status = :status",
+    sql.Named("name", "John"),
+    sql.Named("status", "active"),
+)
+
+// SQL Server style
+rows, err := db.Query(
+    "SELECT * FROM users WHERE name = @name AND status = @status",
+    sql.Named("name", "John"),
+    sql.Named("status", "active"),
+)
+```
+
+Named parameters can appear multiple times in a query:
+
+```go
+rows, err := db.Query(
+    "SELECT * FROM users WHERE first_name = :name OR last_name = :name",
+    sql.Named("name", "Smith"),
+)
+```
+
+## Connection Options
+
+Use `OpenConnectorWithOptions` for advanced configuration:
+
+```go
+import "github.com/slingdata-io/godbc"
+
+// Create connector with options
+connector, err := odbc.OpenConnectorWithOptions(
+    "Driver={PostgreSQL Unicode};Server=localhost;Database=mydb",
+    odbc.WithTimezone(time.UTC),
+    odbc.WithTimestampPrecision(odbc.Microseconds),
+    odbc.WithQueryTimeout(30 * time.Second),
+    odbc.WithLastInsertIdBehavior(odbc.LastInsertIdAuto),
+)
+if err != nil {
+    log.Fatal(err)
+}
+
+db := sql.OpenDB(connector)
+defer db.Close()
+```
+
+### Available Options
+
+| Option | Description |
+|--------|-------------|
+| `WithTimezone(tz)` | Set timezone for timestamp handling (default: UTC) |
+| `WithTimestampPrecision(p)` | Set precision: `Seconds`, `Milliseconds`, `Microseconds`, `Nanoseconds` |
+| `WithQueryTimeout(d)` | Set default query timeout (default: no timeout) |
+| `WithLastInsertIdBehavior(b)` | Set LastInsertId handling: `LastInsertIdAuto`, `LastInsertIdDisabled` |
+
+## Query Timeout
+
+Set a timeout for query execution:
+
+```go
+connector, _ := odbc.OpenConnectorWithOptions(
+    connString,
+    odbc.WithQueryTimeout(30 * time.Second),
+)
+db := sql.OpenDB(connector)
+
+// All queries will timeout after 30 seconds
+rows, err := db.Query("SELECT * FROM large_table")
+```
+
+You can also use context-based timeouts:
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+
+rows, err := db.QueryContext(ctx, "SELECT * FROM large_table")
+```
+
+## Output Parameters
+
+When calling stored procedures, retrieve output parameter values from the result:
+
+```go
+// Execute stored procedure with output parameter
+result, err := db.Exec("CALL get_user_count(?)", sql.Out{Dest: new(int64)})
+if err != nil {
+    log.Fatal(err)
+}
+
+// Get output parameters (requires type assertion to *odbc.Result)
+if odbcResult, ok := result.(*odbc.Result); ok {
+    params := odbcResult.OutputParams()
+    count := params[0].(int64)
+    fmt.Printf("User count: %d\n", count)
+}
+```
+
 ## Unit Tests
 
 Run the unit tests (no database connection required):
