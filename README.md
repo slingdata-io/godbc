@@ -188,12 +188,12 @@ Use `OpenConnectorWithOptions` for advanced configuration:
 import "github.com/slingdata-io/godbc"
 
 // Create connector with options
-connector, err := odbc.OpenConnectorWithOptions(
+connector, err := godbc.OpenConnectorWithOptions(
     "Driver={PostgreSQL Unicode};Server=localhost;Database=mydb",
-    odbc.WithTimezone(time.UTC),
-    odbc.WithTimestampPrecision(odbc.Microseconds),
-    odbc.WithQueryTimeout(30 * time.Second),
-    odbc.WithLastInsertIdBehavior(odbc.LastInsertIdAuto),
+    godbc.WithTimezone(time.UTC),
+    godbc.WithTimestampPrecision(godbc.Microseconds),
+    godbc.WithQueryTimeout(30 * time.Second),
+    godbc.WithLastInsertIdBehavior(godbc.LastInsertIdAuto),
 )
 if err != nil {
     log.Fatal(err)
@@ -217,9 +217,9 @@ defer db.Close()
 Set a timeout for query execution:
 
 ```go
-connector, _ := odbc.OpenConnectorWithOptions(
+connector, _ := godbc.OpenConnectorWithOptions(
     connString,
-    odbc.WithQueryTimeout(30 * time.Second),
+    godbc.WithQueryTimeout(30 * time.Second),
 )
 db := sql.OpenDB(connector)
 
@@ -247,8 +247,8 @@ if err != nil {
     log.Fatal(err)
 }
 
-// Get output parameters (requires type assertion to *odbc.Result)
-if odbcResult, ok := result.(*odbc.Result); ok {
+// Get output parameters (requires type assertion to *godbc.Result)
+if odbcResult, ok := result.(*godbc.Result); ok {
     params := odbcResult.OutputParams()
     count := params[0].(int64)
     fmt.Printf("User count: %d\n", count)
@@ -346,10 +346,10 @@ The driver provides helper functions for error classification:
 import "github.com/slingdata-io/godbc"
 
 if err := db.Ping(); err != nil {
-    if odbc.IsConnectionError(err) {
+    if godbc.IsConnectionError(err) {
         // Handle connection failure
     }
-    if odbc.IsRetryable(err) {
+    if godbc.IsRetryable(err) {
         // Retry the operation
     }
 }
