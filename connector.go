@@ -16,6 +16,9 @@ type Connector struct {
 	DefaultTimezone           *time.Location       // Default timezone for timestamp retrieval (defaults to UTC)
 	DefaultTimestampPrecision TimestampPrecision   // Default precision for Timestamp type (defaults to Milliseconds)
 	LastInsertIdBehavior      LastInsertIdBehavior // How to handle LastInsertId() (defaults to Auto)
+
+	// Query execution options
+	QueryTimeout time.Duration // Default query timeout (0 = no timeout)
 }
 
 // ConnectorOption configures a Connector
@@ -39,6 +42,15 @@ func WithTimestampPrecision(precision TimestampPrecision) ConnectorOption {
 func WithLastInsertIdBehavior(behavior LastInsertIdBehavior) ConnectorOption {
 	return func(c *Connector) {
 		c.LastInsertIdBehavior = behavior
+	}
+}
+
+// WithQueryTimeout sets the default query timeout for all statements.
+// The timeout is applied using SQL_ATTR_QUERY_TIMEOUT and context cancellation.
+// A value of 0 means no timeout (the default).
+func WithQueryTimeout(d time.Duration) ConnectorOption {
+	return func(c *Connector) {
+		c.QueryTimeout = d
 	}
 }
 
@@ -82,6 +94,7 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 		env:                  env,
 		dbc:                  dbc,
 		lastInsertIdBehavior: c.LastInsertIdBehavior,
+		queryTimeout:         c.QueryTimeout,
 	}
 
 	// Detect database type for LastInsertId support

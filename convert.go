@@ -364,6 +364,289 @@ func getBufferPtr(buf interface{}) (uintptr, SQLLEN) {
 	}
 }
 
+// ColumnBuffer holds the buffer data for array parameter binding
+type ColumnBuffer struct {
+	Data      interface{}   // The actual buffer (slice of values)
+	CType     SQLSMALLINT   // ODBC C type
+	SQLType   SQLSMALLINT   // ODBC SQL type
+	ColSize   SQLULEN       // Column size
+	DecDigits SQLSMALLINT   // Decimal digits
+	Lengths   []SQLLEN      // Length/indicator array (one per row)
+	ElemSize  int           // Size of each element in bytes
+}
+
+// AllocateColumnArray allocates a column buffer for array parameter binding
+// based on the type of the first non-nil value in the column
+func AllocateColumnArray(values []interface{}, numRows int) (*ColumnBuffer, error) {
+	if numRows == 0 {
+		return nil, nil
+	}
+
+	// Find the first non-nil value to determine the type
+	var typeHint interface{}
+	for _, v := range values {
+		if v != nil {
+			typeHint = v
+			break
+		}
+	}
+
+	buf := &ColumnBuffer{
+		Lengths: make([]SQLLEN, numRows),
+	}
+
+	// Default to string if all values are nil
+	if typeHint == nil {
+		buf.Data = make([]byte, numRows*256)
+		buf.CType = SQL_C_CHAR
+		buf.SQLType = SQL_VARCHAR
+		buf.ColSize = 255
+		buf.ElemSize = 256
+		for i := range buf.Lengths {
+			buf.Lengths[i] = SQL_NULL_DATA
+		}
+		return buf, nil
+	}
+
+	switch typeHint.(type) {
+	case bool:
+		data := make([]byte, numRows)
+		for i, v := range values {
+			if v == nil {
+				buf.Lengths[i] = SQL_NULL_DATA
+			} else if b, ok := v.(bool); ok && b {
+				data[i] = 1
+				buf.Lengths[i] = 1
+			} else {
+				data[i] = 0
+				buf.Lengths[i] = 1
+			}
+		}
+		buf.Data = data
+		buf.CType = SQL_C_BIT
+		buf.SQLType = SQL_BIT
+		buf.ColSize = 1
+		buf.ElemSize = 1
+
+	case int, int64:
+		data := make([]int64, numRows)
+		for i, v := range values {
+			if v == nil {
+				buf.Lengths[i] = SQL_NULL_DATA
+			} else {
+				switch val := v.(type) {
+				case int:
+					data[i] = int64(val)
+				case int64:
+					data[i] = val
+				case int32:
+					data[i] = int64(val)
+				case int16:
+					data[i] = int64(val)
+				case int8:
+					data[i] = int64(val)
+				}
+				buf.Lengths[i] = 8
+			}
+		}
+		buf.Data = data
+		buf.CType = SQL_C_SBIGINT
+		buf.SQLType = SQL_BIGINT
+		buf.ColSize = 20
+		buf.ElemSize = 8
+
+	case int32:
+		data := make([]int32, numRows)
+		for i, v := range values {
+			if v == nil {
+				buf.Lengths[i] = SQL_NULL_DATA
+			} else if val, ok := v.(int32); ok {
+				data[i] = val
+				buf.Lengths[i] = 4
+			}
+		}
+		buf.Data = data
+		buf.CType = SQL_C_SLONG
+		buf.SQLType = SQL_INTEGER
+		buf.ColSize = 11
+		buf.ElemSize = 4
+
+	case float64:
+		data := make([]float64, numRows)
+		for i, v := range values {
+			if v == nil {
+				buf.Lengths[i] = SQL_NULL_DATA
+			} else {
+				switch val := v.(type) {
+				case float64:
+					data[i] = val
+				case float32:
+					data[i] = float64(val)
+				}
+				buf.Lengths[i] = 8
+			}
+		}
+		buf.Data = data
+		buf.CType = SQL_C_DOUBLE
+		buf.SQLType = SQL_DOUBLE
+		buf.ColSize = 15
+		buf.ElemSize = 8
+
+	case float32:
+		data := make([]float32, numRows)
+		for i, v := range values {
+			if v == nil {
+				buf.Lengths[i] = SQL_NULL_DATA
+			} else if val, ok := v.(float32); ok {
+				data[i] = val
+				buf.Lengths[i] = 4
+			}
+		}
+		buf.Data = data
+		buf.CType = SQL_C_FLOAT
+		buf.SQLType = SQL_REAL
+		buf.ColSize = 7
+		buf.ElemSize = 4
+
+	case string:
+		// Find max length needed
+		maxLen := 0
+		for _, v := range values {
+			if s, ok := v.(string); ok && len(s) > maxLen {
+				maxLen = len(s)
+			}
+		}
+		if maxLen == 0 {
+			maxLen = 255
+		}
+		elemSize := maxLen + 1 // +1 for null terminator
+
+		data := make([]byte, numRows*elemSize)
+		for i, v := range values {
+			if v == nil {
+				buf.Lengths[i] = SQL_NULL_DATA
+			} else if s, ok := v.(string); ok {
+				offset := i * elemSize
+				copy(data[offset:], s)
+				buf.Lengths[i] = SQLLEN(len(s))
+			}
+		}
+		buf.Data = data
+		buf.CType = SQL_C_CHAR
+		buf.SQLType = SQL_VARCHAR
+		buf.ColSize = SQLULEN(maxLen)
+		buf.ElemSize = elemSize
+
+	case []byte:
+		// Find max length needed
+		maxLen := 0
+		for _, v := range values {
+			if b, ok := v.([]byte); ok && len(b) > maxLen {
+				maxLen = len(b)
+			}
+		}
+		if maxLen == 0 {
+			maxLen = 255
+		}
+
+		data := make([]byte, numRows*maxLen)
+		for i, v := range values {
+			if v == nil {
+				buf.Lengths[i] = SQL_NULL_DATA
+			} else if b, ok := v.([]byte); ok {
+				offset := i * maxLen
+				copy(data[offset:], b)
+				buf.Lengths[i] = SQLLEN(len(b))
+			}
+		}
+		buf.Data = data
+		buf.CType = SQL_C_BINARY
+		buf.SQLType = SQL_VARBINARY
+		buf.ColSize = SQLULEN(maxLen)
+		buf.ElemSize = maxLen
+
+	case time.Time:
+		data := make([]SQL_TIMESTAMP_STRUCT, numRows)
+		for i, v := range values {
+			if v == nil {
+				buf.Lengths[i] = SQL_NULL_DATA
+			} else if t, ok := v.(time.Time); ok {
+				data[i] = SQL_TIMESTAMP_STRUCT{
+					Year:     SQLSMALLINT(t.Year()),
+					Month:    SQLUSMALLINT(t.Month()),
+					Day:      SQLUSMALLINT(t.Day()),
+					Hour:     SQLUSMALLINT(t.Hour()),
+					Minute:   SQLUSMALLINT(t.Minute()),
+					Second:   SQLUSMALLINT(t.Second()),
+					Fraction: SQLUINTEGER((t.Nanosecond() / 1_000_000) * 1_000_000),
+				}
+				buf.Lengths[i] = SQLLEN(unsafe.Sizeof(data[0]))
+			}
+		}
+		buf.Data = data
+		buf.CType = SQL_C_TIMESTAMP
+		buf.SQLType = SQL_TYPE_TIMESTAMP
+		buf.ColSize = 23
+		buf.DecDigits = 3
+		buf.ElemSize = int(unsafe.Sizeof(SQL_TIMESTAMP_STRUCT{}))
+
+	default:
+		// Fall back to string representation
+		maxLen := 255
+		elemSize := maxLen + 1
+
+		data := make([]byte, numRows*elemSize)
+		for i, v := range values {
+			if v == nil {
+				buf.Lengths[i] = SQL_NULL_DATA
+			} else {
+				s := fmt.Sprintf("%v", v)
+				offset := i * elemSize
+				copy(data[offset:], s)
+				buf.Lengths[i] = SQLLEN(len(s))
+			}
+		}
+		buf.Data = data
+		buf.CType = SQL_C_CHAR
+		buf.SQLType = SQL_VARCHAR
+		buf.ColSize = SQLULEN(maxLen)
+		buf.ElemSize = elemSize
+	}
+
+	return buf, nil
+}
+
+// GetColumnBufferPtr returns a pointer to the start of the column buffer data
+func (cb *ColumnBuffer) GetColumnBufferPtr() uintptr {
+	switch v := cb.Data.(type) {
+	case []byte:
+		if len(v) > 0 {
+			return uintptr(unsafe.Pointer(&v[0]))
+		}
+	case []int64:
+		if len(v) > 0 {
+			return uintptr(unsafe.Pointer(&v[0]))
+		}
+	case []int32:
+		if len(v) > 0 {
+			return uintptr(unsafe.Pointer(&v[0]))
+		}
+	case []float64:
+		if len(v) > 0 {
+			return uintptr(unsafe.Pointer(&v[0]))
+		}
+	case []float32:
+		if len(v) > 0 {
+			return uintptr(unsafe.Pointer(&v[0]))
+		}
+	case []SQL_TIMESTAMP_STRUCT:
+		if len(v) > 0 {
+			return uintptr(unsafe.Pointer(&v[0]))
+		}
+	}
+	return 0
+}
+
 // SQLTypeName returns a human-readable name for an SQL type
 func SQLTypeName(sqlType SQLSMALLINT) string {
 	switch sqlType {

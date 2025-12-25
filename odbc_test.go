@@ -1194,7 +1194,7 @@ func TestIsValidDecimalString(t *testing.T) {
 }
 
 // =============================================================================
-// Phase 3 Tests: Output Parameters, LastInsertId, Batch, Scrollable Cursors
+// Tests: Output Parameters, LastInsertId, Batch, Scrollable Cursors
 // =============================================================================
 
 // Output Parameter Tests
@@ -1399,5 +1399,329 @@ func TestLastInsertIdQueries(t *testing.T) {
 	}
 	if lastInsertIdQueries["sqlite"] != "SELECT last_insert_rowid()" {
 		t.Errorf("unexpected SQLite identity query: %s", lastInsertIdQueries["sqlite"])
+	}
+}
+
+// =============================================================================
+// Named Parameters Tests
+// =============================================================================
+
+func TestParseNamedParams_NoParams(t *testing.T) {
+	// Query with no named parameters should return nil
+	result := ParseNamedParams("SELECT * FROM users WHERE id = ?")
+	if result != nil {
+		t.Errorf("expected nil for query with positional params, got %+v", result)
+	}
+
+	result = ParseNamedParams("SELECT * FROM users")
+	if result != nil {
+		t.Errorf("expected nil for query with no params, got %+v", result)
+	}
+}
+
+func TestParseNamedParams_ColonStyle(t *testing.T) {
+	// Oracle/PostgreSQL :name style
+	result := ParseNamedParams("SELECT * FROM users WHERE name = :name AND age > :age")
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.Query != "SELECT * FROM users WHERE name = ? AND age > ?" {
+		t.Errorf("unexpected query: %s", result.Query)
+	}
+	if len(result.Names) != 2 {
+		t.Errorf("expected 2 names, got %d", len(result.Names))
+	}
+	if result.Names[0] != "name" || result.Names[1] != "age" {
+		t.Errorf("unexpected names: %v", result.Names)
+	}
+	if len(result.Positions["name"]) != 1 || result.Positions["name"][0] != 1 {
+		t.Errorf("unexpected positions for 'name': %v", result.Positions["name"])
+	}
+	if len(result.Positions["age"]) != 1 || result.Positions["age"][0] != 2 {
+		t.Errorf("unexpected positions for 'age': %v", result.Positions["age"])
+	}
+}
+
+func TestParseNamedParams_AtStyle(t *testing.T) {
+	// SQL Server @name style
+	result := ParseNamedParams("SELECT * FROM users WHERE name = @name AND age > @age")
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.Query != "SELECT * FROM users WHERE name = ? AND age > ?" {
+		t.Errorf("unexpected query: %s", result.Query)
+	}
+	if len(result.Names) != 2 {
+		t.Errorf("expected 2 names, got %d", len(result.Names))
+	}
+}
+
+func TestParseNamedParams_DollarStyle(t *testing.T) {
+	// PostgreSQL $name style (not $1 which is positional)
+	result := ParseNamedParams("SELECT * FROM users WHERE name = $name AND age > $age")
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.Query != "SELECT * FROM users WHERE name = ? AND age > ?" {
+		t.Errorf("unexpected query: %s", result.Query)
+	}
+}
+
+func TestParseNamedParams_RepeatedParam(t *testing.T) {
+	// Same parameter used multiple times
+	result := ParseNamedParams("SELECT * FROM users WHERE name = :name OR email LIKE :name")
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.Query != "SELECT * FROM users WHERE name = ? OR email LIKE ?" {
+		t.Errorf("unexpected query: %s", result.Query)
+	}
+	// Should have only one unique name
+	if len(result.Names) != 1 {
+		t.Errorf("expected 1 unique name, got %d", len(result.Names))
+	}
+	// But two positions for that name
+	if len(result.Positions["name"]) != 2 {
+		t.Errorf("expected 2 positions for 'name', got %d", len(result.Positions["name"]))
+	}
+	if result.Positions["name"][0] != 1 || result.Positions["name"][1] != 2 {
+		t.Errorf("unexpected positions: %v", result.Positions["name"])
+	}
+}
+
+func TestParseNamedParams_StringLiteral(t *testing.T) {
+	// Named parameter syntax inside string literals should be ignored
+	result := ParseNamedParams("SELECT * FROM users WHERE name = ':not_a_param' AND id = :id")
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	// Only :id should be recognized
+	if len(result.Names) != 1 || result.Names[0] != "id" {
+		t.Errorf("unexpected names: %v", result.Names)
+	}
+	// String literal should be preserved
+	if result.Query != "SELECT * FROM users WHERE name = ':not_a_param' AND id = ?" {
+		t.Errorf("unexpected query: %s", result.Query)
+	}
+}
+
+func TestParseNamedParams_Comment(t *testing.T) {
+	// Named parameter syntax inside comments should be ignored
+	result := ParseNamedParams("SELECT * FROM users -- :comment\nWHERE id = :id")
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if len(result.Names) != 1 || result.Names[0] != "id" {
+		t.Errorf("unexpected names: %v", result.Names)
+	}
+}
+
+func TestParseNamedParams_BlockComment(t *testing.T) {
+	// Named parameter syntax inside block comments should be ignored
+	result := ParseNamedParams("SELECT * FROM users /* :comment */ WHERE id = :id")
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if len(result.Names) != 1 || result.Names[0] != "id" {
+		t.Errorf("unexpected names: %v", result.Names)
+	}
+}
+
+func TestParseNamedParams_Underscore(t *testing.T) {
+	// Parameter names with underscores
+	result := ParseNamedParams("SELECT * FROM users WHERE user_name = :user_name AND created_at > :start_date")
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if len(result.Names) != 2 {
+		t.Errorf("expected 2 names, got %d: %v", len(result.Names), result.Names)
+	}
+}
+
+func TestParameterError(t *testing.T) {
+	err := &ParameterError{Name: "foo", Message: "missing value"}
+	expected := "parameter 'foo': missing value"
+	if err.Error() != expected {
+		t.Errorf("expected %q, got %q", expected, err.Error())
+	}
+
+	err2 := &ParameterError{Message: "invalid type"}
+	expected2 := "parameter: invalid type"
+	if err2.Error() != expected2 {
+		t.Errorf("expected %q, got %q", expected2, err2.Error())
+	}
+}
+
+// =============================================================================
+// Column Array Allocation Tests
+// =============================================================================
+
+func TestAllocateColumnArray_EmptySlice(t *testing.T) {
+	result, err := AllocateColumnArray(nil, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != nil {
+		t.Errorf("expected nil for empty slice")
+	}
+}
+
+func TestAllocateColumnArray_AllNil(t *testing.T) {
+	values := []interface{}{nil, nil, nil}
+	result, err := AllocateColumnArray(values, 3)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	// Should default to string type
+	if result.CType != SQL_C_CHAR {
+		t.Errorf("expected SQL_C_CHAR, got %d", result.CType)
+	}
+	// All lengths should be NULL_DATA
+	for i, l := range result.Lengths {
+		if l != SQL_NULL_DATA {
+			t.Errorf("expected NULL_DATA at index %d, got %d", i, l)
+		}
+	}
+}
+
+func TestAllocateColumnArray_Integers(t *testing.T) {
+	values := []interface{}{int64(1), int64(2), nil, int64(4)}
+	result, err := AllocateColumnArray(values, 4)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.CType != SQL_C_SBIGINT {
+		t.Errorf("expected SQL_C_SBIGINT, got %d", result.CType)
+	}
+	if result.SQLType != SQL_BIGINT {
+		t.Errorf("expected SQL_BIGINT, got %d", result.SQLType)
+	}
+	data, ok := result.Data.([]int64)
+	if !ok {
+		t.Fatalf("expected []int64, got %T", result.Data)
+	}
+	if data[0] != 1 || data[1] != 2 || data[3] != 4 {
+		t.Errorf("unexpected data: %v", data)
+	}
+	if result.Lengths[2] != SQL_NULL_DATA {
+		t.Errorf("expected NULL_DATA at index 2")
+	}
+}
+
+func TestAllocateColumnArray_Strings(t *testing.T) {
+	values := []interface{}{"hello", "world", nil, "test"}
+	result, err := AllocateColumnArray(values, 4)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.CType != SQL_C_CHAR {
+		t.Errorf("expected SQL_C_CHAR, got %d", result.CType)
+	}
+	// Element size should accommodate the longest string + null terminator
+	if result.ElemSize < 6 { // "hello" = 5 + 1
+		t.Errorf("expected elemSize >= 6, got %d", result.ElemSize)
+	}
+	if result.Lengths[0] != 5 {
+		t.Errorf("expected length 5 for 'hello', got %d", result.Lengths[0])
+	}
+	if result.Lengths[2] != SQL_NULL_DATA {
+		t.Errorf("expected NULL_DATA at index 2")
+	}
+}
+
+func TestAllocateColumnArray_Floats(t *testing.T) {
+	values := []interface{}{1.5, 2.5, 3.5}
+	result, err := AllocateColumnArray(values, 3)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.CType != SQL_C_DOUBLE {
+		t.Errorf("expected SQL_C_DOUBLE, got %d", result.CType)
+	}
+	data, ok := result.Data.([]float64)
+	if !ok {
+		t.Fatalf("expected []float64, got %T", result.Data)
+	}
+	if data[0] != 1.5 || data[1] != 2.5 || data[2] != 3.5 {
+		t.Errorf("unexpected data: %v", data)
+	}
+}
+
+func TestAllocateColumnArray_Timestamps(t *testing.T) {
+	now := time.Now()
+	values := []interface{}{now, now.Add(time.Hour), nil}
+	result, err := AllocateColumnArray(values, 3)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.CType != SQL_C_TIMESTAMP {
+		t.Errorf("expected SQL_C_TIMESTAMP, got %d", result.CType)
+	}
+	data, ok := result.Data.([]SQL_TIMESTAMP_STRUCT)
+	if !ok {
+		t.Fatalf("expected []SQL_TIMESTAMP_STRUCT, got %T", result.Data)
+	}
+	if data[0].Year != SQLSMALLINT(now.Year()) {
+		t.Errorf("expected year %d, got %d", now.Year(), data[0].Year)
+	}
+	if result.Lengths[2] != SQL_NULL_DATA {
+		t.Errorf("expected NULL_DATA at index 2")
+	}
+}
+
+func TestColumnBuffer_GetColumnBufferPtr(t *testing.T) {
+	// Test with int64 slice
+	buf := &ColumnBuffer{
+		Data: []int64{1, 2, 3},
+	}
+	ptr := buf.GetColumnBufferPtr()
+	if ptr == 0 {
+		t.Error("expected non-zero pointer")
+	}
+
+	// Test with float64 slice
+	buf2 := &ColumnBuffer{
+		Data: []float64{1.5, 2.5},
+	}
+	ptr2 := buf2.GetColumnBufferPtr()
+	if ptr2 == 0 {
+		t.Error("expected non-zero pointer for float64")
+	}
+
+	// Test with byte slice
+	buf3 := &ColumnBuffer{
+		Data: []byte{1, 2, 3, 4},
+	}
+	ptr3 := buf3.GetColumnBufferPtr()
+	if ptr3 == 0 {
+		t.Error("expected non-zero pointer for bytes")
+	}
+}
+
+// =============================================================================
+// Query Timeout Options Test
+// =============================================================================
+
+func TestWithQueryTimeout(t *testing.T) {
+	connector := &Connector{}
+	opt := WithQueryTimeout(5 * time.Second)
+	opt(connector)
+	if connector.QueryTimeout != 5*time.Second {
+		t.Errorf("expected 5s timeout, got %v", connector.QueryTimeout)
 	}
 }

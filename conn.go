@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 )
 
@@ -37,6 +38,9 @@ type Conn struct {
 	// Database type detection for LastInsertId
 	dbType               string
 	lastInsertIdBehavior LastInsertIdBehavior
+
+	// Query execution options
+	queryTimeout time.Duration
 }
 
 // Prepare prepares a statement for execution
@@ -53,6 +57,13 @@ func (c *Conn) PrepareContext(ctx context.Context, query string) (driver.Stmt, e
 		return nil, driver.ErrBadConn
 	}
 
+	// Parse named parameters if present
+	namedParams := ParseNamedParams(query)
+	prepareQuery := query
+	if namedParams != nil {
+		prepareQuery = namedParams.Query
+	}
+
 	// Allocate statement handle
 	var stmtHandle SQLHSTMT
 	ret := AllocHandle(SQL_HANDLE_STMT, SQLHANDLE(c.dbc), (*SQLHANDLE)(&stmtHandle))
@@ -61,7 +72,7 @@ func (c *Conn) PrepareContext(ctx context.Context, query string) (driver.Stmt, e
 	}
 
 	// Prepare the statement
-	ret = Prepare(stmtHandle, query)
+	ret = Prepare(stmtHandle, prepareQuery)
 	if !IsSuccess(ret) {
 		err := NewError(SQL_HANDLE_STMT, SQLHANDLE(stmtHandle))
 		FreeHandle(SQL_HANDLE_STMT, SQLHANDLE(stmtHandle))
@@ -77,10 +88,11 @@ func (c *Conn) PrepareContext(ctx context.Context, query string) (driver.Stmt, e
 	}
 
 	stmt := &Stmt{
-		conn:     c,
-		stmt:     stmtHandle,
-		query:    query,
-		numInput: int(numParams),
+		conn:        c,
+		stmt:        stmtHandle,
+		query:       query,
+		numInput:    int(numParams),
+		namedParams: namedParams,
 	}
 
 	return stmt, nil
@@ -225,8 +237,39 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 		c.mu.Unlock()
 		defer FreeHandle(SQL_HANDLE_STMT, SQLHANDLE(stmtHandle))
 
+		// Set query timeout if configured
+		if c.queryTimeout > 0 {
+			timeoutSecs := int(c.queryTimeout.Seconds())
+			if timeoutSecs < 1 {
+				timeoutSecs = 1
+			}
+			SetStmtAttr(stmtHandle, SQL_ATTR_QUERY_TIMEOUT, uintptr(timeoutSecs), 0)
+		}
+
+		// Start cancellation goroutine if context has deadline/cancel
+		if ctx.Done() != nil {
+			done := make(chan struct{})
+			defer close(done)
+			go func() {
+				select {
+				case <-ctx.Done():
+					Cancel(stmtHandle)
+				case <-done:
+				}
+			}()
+		}
+
+		// Check context before executing
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
 		ret = ExecDirect(stmtHandle, query)
 		if !IsSuccess(ret) && ret != SQL_NO_DATA {
+			// Check if cancelled by context
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(stmtHandle))
 		}
 
@@ -264,8 +307,41 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 		}
 		c.mu.Unlock()
 
+		// Set query timeout if configured
+		if c.queryTimeout > 0 {
+			timeoutSecs := int(c.queryTimeout.Seconds())
+			if timeoutSecs < 1 {
+				timeoutSecs = 1
+			}
+			SetStmtAttr(stmtHandle, SQL_ATTR_QUERY_TIMEOUT, uintptr(timeoutSecs), 0)
+		}
+
+		// Start cancellation goroutine if context has deadline/cancel
+		if ctx.Done() != nil {
+			done := make(chan struct{})
+			defer close(done)
+			go func() {
+				select {
+				case <-ctx.Done():
+					Cancel(stmtHandle)
+				case <-done:
+				}
+			}()
+		}
+
+		// Check context before executing
+		if err := ctx.Err(); err != nil {
+			FreeHandle(SQL_HANDLE_STMT, SQLHANDLE(stmtHandle))
+			return nil, err
+		}
+
 		ret = ExecDirect(stmtHandle, query)
 		if !IsSuccess(ret) {
+			// Check if cancelled by context
+			if ctx.Err() != nil {
+				FreeHandle(SQL_HANDLE_STMT, SQLHANDLE(stmtHandle))
+				return nil, ctx.Err()
+			}
 			err := NewError(SQL_HANDLE_STMT, SQLHANDLE(stmtHandle))
 			FreeHandle(SQL_HANDLE_STMT, SQLHANDLE(stmtHandle))
 			return nil, err

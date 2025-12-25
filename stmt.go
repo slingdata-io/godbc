@@ -46,6 +46,9 @@ type Stmt struct {
 
 	// Cursor configuration
 	cursorType CursorType
+
+	// Named parameter support
+	namedParams *NamedParams
 }
 
 // Close closes the statement
@@ -97,14 +100,45 @@ func (s *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (drive
 		return nil, driver.ErrBadConn
 	}
 
+	// Set query timeout if configured
+	if s.conn.queryTimeout > 0 {
+		timeoutSecs := int(s.conn.queryTimeout.Seconds())
+		if timeoutSecs < 1 {
+			timeoutSecs = 1
+		}
+		SetStmtAttr(s.stmt, SQL_ATTR_QUERY_TIMEOUT, uintptr(timeoutSecs), 0)
+	}
+
+	// Start cancellation goroutine if context has deadline/cancel
+	if ctx.Done() != nil {
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			select {
+			case <-ctx.Done():
+				Cancel(s.stmt)
+			case <-done:
+			}
+		}()
+	}
+
 	// Bind parameters
 	if err := s.bindParams(args); err != nil {
+		return nil, err
+	}
+
+	// Check context before executing
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
 	// Execute the statement
 	ret := Execute(s.stmt)
 	if !IsSuccess(ret) && ret != SQL_NO_DATA {
+		// Check if cancelled by context
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(s.stmt))
 	}
 
@@ -153,14 +187,45 @@ func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driv
 		return nil, driver.ErrBadConn
 	}
 
+	// Set query timeout if configured
+	if s.conn.queryTimeout > 0 {
+		timeoutSecs := int(s.conn.queryTimeout.Seconds())
+		if timeoutSecs < 1 {
+			timeoutSecs = 1
+		}
+		SetStmtAttr(s.stmt, SQL_ATTR_QUERY_TIMEOUT, uintptr(timeoutSecs), 0)
+	}
+
+	// Start cancellation goroutine if context has deadline/cancel
+	if ctx.Done() != nil {
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			select {
+			case <-ctx.Done():
+				Cancel(s.stmt)
+			case <-done:
+			}
+		}()
+	}
+
 	// Bind parameters
 	if err := s.bindParams(args); err != nil {
+		return nil, err
+	}
+
+	// Check context before executing
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
 	// Execute the statement
 	ret := Execute(s.stmt)
 	if !IsSuccess(ret) {
+		// Check if cancelled by context
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(s.stmt))
 	}
 
@@ -170,6 +235,11 @@ func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driv
 
 // bindParams binds parameters to the statement
 func (s *Stmt) bindParams(args []driver.NamedValue) error {
+	// Handle named parameters
+	if s.namedParams != nil {
+		return s.bindNamedParams(args)
+	}
+
 	// Clear previous parameter buffers
 	s.paramBuffers = make([]interface{}, len(args))
 	s.paramLengths = make([]SQLLEN, len(args))
@@ -183,6 +253,65 @@ func (s *Stmt) bindParams(args []driver.NamedValue) error {
 
 		if err := s.bindParam(paramNum, arg.Value); err != nil {
 			return err
+		}
+	}
+
+	return nil
+}
+
+// bindNamedParams handles binding for named parameters
+func (s *Stmt) bindNamedParams(args []driver.NamedValue) error {
+	// Calculate total number of parameter positions needed
+	totalPositions := 0
+	for _, positions := range s.namedParams.Positions {
+		if len(positions) > totalPositions {
+			totalPositions = positions[len(positions)-1]
+		}
+	}
+
+	// Clear previous parameter buffers
+	s.paramBuffers = make([]interface{}, totalPositions)
+	s.paramLengths = make([]SQLLEN, totalPositions)
+	s.outputParams = nil
+
+	// Build a map from parameter name to value for quick lookup
+	valueByName := make(map[string]interface{})
+	valueByOrdinal := make(map[int]interface{})
+
+	for _, arg := range args {
+		if arg.Name != "" {
+			valueByName[arg.Name] = arg.Value
+		} else if arg.Ordinal > 0 {
+			valueByOrdinal[arg.Ordinal] = arg.Value
+		}
+	}
+
+	// Bind each named parameter to all its positions
+	for name, positions := range s.namedParams.Positions {
+		// Look up value by name first
+		value, ok := valueByName[name]
+		if !ok {
+			// Try to find by ordinal based on order in Names slice
+			for idx, n := range s.namedParams.Names {
+				if n == name {
+					if v, exists := valueByOrdinal[idx+1]; exists {
+						value = v
+						ok = true
+					}
+					break
+				}
+			}
+		}
+
+		if !ok {
+			return &ParameterError{Name: name, Message: "missing value for named parameter"}
+		}
+
+		// Bind the value to each position where this parameter appears
+		for _, pos := range positions {
+			if err := s.bindParam(SQLUSMALLINT(pos), value); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -528,7 +657,7 @@ func (s *Stmt) convertOutputBuffer(op outputParamInfo) interface{} {
 // =============================================================================
 
 // ExecBatch executes a prepared statement with multiple parameter sets in a single batch.
-// This is more efficient than calling ExecContext multiple times for bulk inserts/updates.
+// This uses ODBC array binding (SQL_ATTR_PARAMSET_SIZE) for efficient bulk operations.
 // Returns a BatchResult with per-row status information.
 func (s *Stmt) ExecBatch(ctx context.Context, paramSets [][]driver.NamedValue) (*BatchResult, error) {
 	s.mu.Lock()
@@ -542,14 +671,169 @@ func (s *Stmt) ExecBatch(ctx context.Context, paramSets [][]driver.NamedValue) (
 		return &BatchResult{}, nil
 	}
 
-	result := &BatchResult{
-		RowCounts: make([]int64, len(paramSets)),
-		Errors:    make([]error, len(paramSets)),
+	numRows := len(paramSets)
+	numParams := 0
+	if len(paramSets) > 0 {
+		numParams = len(paramSets[0])
 	}
 
-	// For now, execute each parameter set individually
-	// A more efficient implementation would use ODBC array binding,
-	// but that requires more complex buffer management
+	result := &BatchResult{
+		RowCounts: make([]int64, numRows),
+		Errors:    make([]error, numRows),
+	}
+
+	// Try to use true array binding
+	arrayBindingWorked := s.execBatchArrayBinding(ctx, paramSets, numRows, numParams, result)
+
+	if !arrayBindingWorked {
+		// Fall back to row-by-row execution if array binding fails
+		s.execBatchRowByRow(ctx, paramSets, result)
+	}
+
+	s.outputParams = nil
+
+	return result, nil
+}
+
+// execBatchArrayBinding attempts to use ODBC array binding for batch execution
+// Returns true if array binding was successful, false if fallback is needed
+func (s *Stmt) execBatchArrayBinding(ctx context.Context, paramSets [][]driver.NamedValue, numRows, numParams int, result *BatchResult) bool {
+	if numParams == 0 {
+		return false
+	}
+
+	// Set up array binding
+	// Set paramset size
+	ret := SetStmtAttr(s.stmt, SQL_ATTR_PARAMSET_SIZE, uintptr(numRows), 0)
+	if !IsSuccess(ret) {
+		return false // Driver doesn't support array binding
+	}
+
+	// Set column-wise binding
+	ret = SetStmtAttr(s.stmt, SQL_ATTR_PARAM_BIND_TYPE, SQL_PARAM_BIND_BY_COLUMN, 0)
+	if !IsSuccess(ret) {
+		// Reset paramset size and fall back
+		SetStmtAttr(s.stmt, SQL_ATTR_PARAMSET_SIZE, 1, 0)
+		return false
+	}
+
+	// Allocate status array for per-row results
+	statusArray := make([]SQLUSMALLINT, numRows)
+	ret = SetStmtAttr(s.stmt, SQL_ATTR_PARAM_STATUS_PTR, uintptr(unsafe.Pointer(&statusArray[0])), 0)
+	if !IsSuccess(ret) {
+		SetStmtAttr(s.stmt, SQL_ATTR_PARAMSET_SIZE, 1, 0)
+		return false
+	}
+
+	// Track number of rows processed
+	var rowsProcessed SQLULEN
+	ret = SetStmtAttr(s.stmt, SQL_ATTR_PARAMS_PROCESSED_PTR, uintptr(unsafe.Pointer(&rowsProcessed)), 0)
+	if !IsSuccess(ret) {
+		SetStmtAttr(s.stmt, SQL_ATTR_PARAMSET_SIZE, 1, 0)
+		return false
+	}
+
+	// Allocate column buffers for each parameter
+	columnBuffers := make([]*ColumnBuffer, numParams)
+
+	for paramIdx := 0; paramIdx < numParams; paramIdx++ {
+		// Collect all values for this column
+		values := make([]interface{}, numRows)
+		for rowIdx := 0; rowIdx < numRows; rowIdx++ {
+			if paramIdx < len(paramSets[rowIdx]) {
+				values[rowIdx] = paramSets[rowIdx][paramIdx].Value
+			}
+		}
+
+		// Allocate the column buffer
+		colBuf, err := AllocateColumnArray(values, numRows)
+		if err != nil || colBuf == nil {
+			// Reset and fall back
+			SetStmtAttr(s.stmt, SQL_ATTR_PARAMSET_SIZE, 1, 0)
+			FreeStmt(s.stmt, SQL_RESET_PARAMS)
+			return false
+		}
+		columnBuffers[paramIdx] = colBuf
+
+		// Bind the parameter array
+		dataPtr := colBuf.GetColumnBufferPtr()
+		ret = BindParameter(
+			s.stmt,
+			SQLUSMALLINT(paramIdx+1),
+			SQL_PARAM_INPUT,
+			colBuf.CType,
+			colBuf.SQLType,
+			colBuf.ColSize,
+			colBuf.DecDigits,
+			dataPtr,
+			SQLLEN(colBuf.ElemSize),
+			&colBuf.Lengths[0],
+		)
+		if !IsSuccess(ret) {
+			SetStmtAttr(s.stmt, SQL_ATTR_PARAMSET_SIZE, 1, 0)
+			FreeStmt(s.stmt, SQL_RESET_PARAMS)
+			return false
+		}
+	}
+
+	// Execute the batch
+	ret = Execute(s.stmt)
+
+	// Process results
+	if IsSuccess(ret) || ret == SQL_SUCCESS_WITH_INFO {
+		// Get rows affected
+		var totalRowCount SQLLEN
+		RowCount(s.stmt, &totalRowCount)
+		result.TotalRowsAffected = int64(totalRowCount)
+
+		// Distribute row counts based on status
+		successCount := 0
+		for i := 0; i < numRows; i++ {
+			switch statusArray[i] {
+			case SQL_PARAM_SUCCESS, SQL_PARAM_SUCCESS_WITH_INFO:
+				// For simplicity, assume 1 row affected per successful param set
+				result.RowCounts[i] = 1
+				successCount++
+			case SQL_PARAM_ERROR:
+				result.Errors[i] = fmt.Errorf("batch row %d failed", i)
+			case SQL_PARAM_UNUSED:
+				// Row was not processed
+				result.RowCounts[i] = 0
+			default:
+				// DIAG_UNAVAILABLE or unknown
+				result.RowCounts[i] = 1
+				successCount++
+			}
+		}
+		// Adjust total if we got actual count
+		if successCount > 0 && result.TotalRowsAffected > 0 {
+			avgPerRow := result.TotalRowsAffected / int64(successCount)
+			for i := 0; i < numRows; i++ {
+				if result.Errors[i] == nil && result.RowCounts[i] > 0 {
+					result.RowCounts[i] = avgPerRow
+				}
+			}
+		}
+	} else if ret == SQL_NO_DATA {
+		// No rows affected
+		result.TotalRowsAffected = 0
+	} else {
+		// Batch failed entirely
+		err := NewError(SQL_HANDLE_STMT, SQLHANDLE(s.stmt))
+		for i := 0; i < numRows; i++ {
+			result.Errors[i] = err
+		}
+	}
+
+	// Reset for normal operation
+	SetStmtAttr(s.stmt, SQL_ATTR_PARAMSET_SIZE, 1, 0)
+	FreeStmt(s.stmt, SQL_RESET_PARAMS)
+
+	return true
+}
+
+// execBatchRowByRow executes each parameter set individually (fallback)
+func (s *Stmt) execBatchRowByRow(ctx context.Context, paramSets [][]driver.NamedValue, result *BatchResult) {
 	for i, params := range paramSets {
 		// Clear and bind parameters for this set
 		s.paramBuffers = make([]interface{}, len(params))
@@ -587,10 +871,6 @@ func (s *Stmt) ExecBatch(ctx context.Context, paramSets [][]driver.NamedValue) (
 		// Reset parameters for next set
 		FreeStmt(s.stmt, SQL_RESET_PARAMS)
 	}
-
-	s.outputParams = nil
-
-	return result, nil
 }
 
 // isInsertStatement checks if a SQL statement is an INSERT statement
