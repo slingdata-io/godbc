@@ -1,4 +1,4 @@
-package odbc
+package godbc
 
 import (
 	"fmt"
@@ -120,10 +120,10 @@ func NewError(handleType SQLSMALLINT, handle SQLHANDLE) error {
 // These follow the ODBC specification and can be used with errors.Is.
 const (
 	// Connection errors (08xxx)
-	SQLStateConnectionFailure     = "08001" // Unable to connect
-	SQLStateConnectionNotOpen     = "08003" // Connection not open
-	SQLStateConnectionRejected    = "08004" // Connection rejected by server
-	SQLStateConnectionError       = "08S01" // Communication link failure
+	SQLStateConnectionFailure  = "08001" // Unable to connect
+	SQLStateConnectionNotOpen  = "08003" // Connection not open
+	SQLStateConnectionRejected = "08004" // Connection rejected by server
+	SQLStateConnectionError    = "08S01" // Communication link failure
 
 	// Warning states (01xxx)
 	SQLStateDataTruncation = "01004" // Data truncated
@@ -133,10 +133,10 @@ const (
 	SQLStateNoData = "02000" // No data found
 
 	// Data errors (22xxx)
-	SQLStateStringTruncation  = "22001" // String data right truncation
-	SQLStateNumericOverflow   = "22003" // Numeric value out of range
-	SQLStateInvalidDatetime   = "22007" // Invalid datetime format
-	SQLStateDivisionByZero    = "22012" // Division by zero
+	SQLStateStringTruncation = "22001" // String data right truncation
+	SQLStateNumericOverflow  = "22003" // Numeric value out of range
+	SQLStateInvalidDatetime  = "22007" // Invalid datetime format
+	SQLStateDivisionByZero   = "22012" // Division by zero
 
 	// Constraint violations (23xxx)
 	SQLStateDuplicateKey        = "23000" // Integrity constraint violation

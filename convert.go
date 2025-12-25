@@ -1,4 +1,4 @@
-package odbc
+package godbc
 
 import (
 	"encoding/hex"
@@ -366,13 +366,13 @@ func getBufferPtr(buf interface{}) (uintptr, SQLLEN) {
 
 // ColumnBuffer holds the buffer data for array parameter binding
 type ColumnBuffer struct {
-	Data      interface{}   // The actual buffer (slice of values)
-	CType     SQLSMALLINT   // ODBC C type
-	SQLType   SQLSMALLINT   // ODBC SQL type
-	ColSize   SQLULEN       // Column size
-	DecDigits SQLSMALLINT   // Decimal digits
-	Lengths   []SQLLEN      // Length/indicator array (one per row)
-	ElemSize  int           // Size of each element in bytes
+	Data      interface{} // The actual buffer (slice of values)
+	CType     SQLSMALLINT // ODBC C type
+	SQLType   SQLSMALLINT // ODBC SQL type
+	ColSize   SQLULEN     // Column size
+	DecDigits SQLSMALLINT // Decimal digits
+	Lengths   []SQLLEN    // Length/indicator array (one per row)
+	ElemSize  int         // Size of each element in bytes
 }
 
 // AllocateColumnArray allocates a column buffer for array parameter binding

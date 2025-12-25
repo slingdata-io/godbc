@@ -1,4 +1,4 @@
-package odbc
+package godbc
 
 import (
 	"context"
@@ -20,12 +20,12 @@ const (
 
 // outputParamInfo tracks information about output parameters for retrieval
 type outputParamInfo struct {
-	index     int           // Parameter index (0-based)
+	index     int // Parameter index (0-based)
 	direction ParamDirection
-	buffer    interface{}   // Buffer holding the output value
-	length    *SQLLEN       // Length/indicator pointer
-	cType     SQLSMALLINT   // C type for retrieval
-	goType    interface{}   // Original Go type hint for conversion
+	buffer    interface{} // Buffer holding the output value
+	length    *SQLLEN     // Length/indicator pointer
+	cType     SQLSMALLINT // C type for retrieval
+	goType    interface{} // Original Go type hint for conversion
 }
 
 // Stmt implements driver.Stmt for prepared statements

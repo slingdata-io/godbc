@@ -1,4 +1,4 @@
-package odbc
+package godbc
 
 // ParameterError represents an error with parameter binding
 type ParameterError struct {

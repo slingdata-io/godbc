@@ -1,6 +1,6 @@
 //go:build windows
 
-package odbc
+package godbc
 
 import (
 	"syscall"

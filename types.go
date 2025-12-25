@@ -1,4 +1,4 @@
-package odbc
+package godbc
 
 import "time"
 
