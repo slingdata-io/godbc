@@ -27,12 +27,37 @@ jobs:
             exit 1
           fi
 
-      - name: Check if tag already exists
+      - name: Check if tag already exists locally
         run: |
           VERSION="${{ github.event.inputs.version }}"
           if git rev-parse "$VERSION" >/dev/null 2>&1; then
-            echo "Error: Tag $VERSION already exists"
+            echo "Error: Tag $VERSION already exists locally"
             exit 1
+          fi
+
+      - name: Check if tag already exists on remote
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          git fetch --tags
+          if git ls-remote --tags origin | grep -q "refs/tags/$VERSION$"; then
+            echo "Error: Tag $VERSION already exists on remote"
+            echo "⚠️  WARNING: Go modules are immutable. Never reuse or force-push version tags."
+            echo "   Once a version is published, it's permanently recorded in Go's checksum database."
+            echo "   Create a new version instead (e.g., bump to next patch/minor/major version)."
+            exit 1
+          fi
+
+      - name: Check Go checksum database
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          MODULE="github.com/slingdata-io/godbc"
+          echo "Checking if $MODULE@$VERSION exists in Go checksum database..."
+          if curl -s "https://sum.golang.org/lookup/$MODULE@$VERSION" | grep -q "$VERSION"; then
+            echo "Error: $MODULE@$VERSION is already recorded in Go's checksum database"
+            echo "⚠️  This version cannot be reused. You must create a new version."
+            exit 1
+          else
+            echo "✓ Version $VERSION is available for release"
           fi
 
       - name: Create and push tag
