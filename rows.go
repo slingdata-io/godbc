@@ -14,14 +14,15 @@ const maxFetchIterations = 1000
 
 // Rows implements driver.Rows for result set iteration
 type Rows struct {
-	stmt      *Stmt
-	columns   []string
-	colTypes  []SQLSMALLINT
-	colSizes  []SQLULEN
-	decDigits []SQLSMALLINT // decimal digits (scale) for NUMERIC/DECIMAL types
-	nullable  []SQLSMALLINT
-	closed    bool
-	closeStmt bool // Whether to close the statement when rows are closed
+	stmt        *Stmt
+	columns     []string
+	colTypes    []SQLSMALLINT
+	colSizes    []SQLULEN
+	decDigits   []SQLSMALLINT // decimal digits (scale) for NUMERIC/DECIMAL types
+	nullable    []SQLSMALLINT
+	nativeTypes []string // native database type names (e.g., "VARCHAR", "DATETIME2", "BIGINT")
+	closed      bool
+	closeStmt   bool // Whether to close the statement when rows are closed
 }
 
 // newRows creates a new Rows from a statement
@@ -46,8 +47,10 @@ func newRows(stmt *Stmt, closeStmt bool) (*Rows, error) {
 	colSizes := make([]SQLULEN, numCols)
 	decDigits := make([]SQLSMALLINT, numCols)
 	nullable := make([]SQLSMALLINT, numCols)
+	nativeTypes := make([]string, numCols)
 
 	colName := make([]byte, 256)
+	typeName := make([]byte, 256)
 	for i := SQLUSMALLINT(1); i <= SQLUSMALLINT(numCols); i++ {
 		nameLen, dataType, colSize, decDigitsVal, nullableVal, ret := DescribeCol(stmt.stmt, i, colName)
 		if !IsSuccess(ret) {
@@ -59,16 +62,23 @@ func newRows(stmt *Stmt, closeStmt bool) (*Rows, error) {
 		colSizes[i-1] = colSize
 		decDigits[i-1] = decDigitsVal
 		nullable[i-1] = nullableVal
+
+		// Get native type name using SQLColAttribute with SQL_DESC_TYPE_NAME
+		strLen, _, attrRet := ColAttribute(stmt.stmt, i, SQL_DESC_TYPE_NAME, typeName)
+		if IsSuccess(attrRet) && strLen > 0 {
+			nativeTypes[i-1] = string(typeName[:strLen])
+		}
 	}
 
 	return &Rows{
-		stmt:      stmt,
-		columns:   columns,
-		colTypes:  colTypes,
-		colSizes:  colSizes,
-		decDigits: decDigits,
-		nullable:  nullable,
-		closeStmt: closeStmt,
+		stmt:        stmt,
+		columns:     columns,
+		colTypes:    colTypes,
+		colSizes:    colSizes,
+		decDigits:   decDigits,
+		nullable:    nullable,
+		nativeTypes: nativeTypes,
+		closeStmt:   closeStmt,
 	}, nil
 }
 
@@ -628,9 +638,26 @@ func (r *Rows) ColumnTypeScanType(index int) reflect.Type {
 	}
 }
 
-// ColumnTypeDatabaseTypeName returns the database-specific type name for a column.
-// For example: "VARCHAR", "INTEGER", "DECIMAL", "TIMESTAMP".
+// ColumnTypeDatabaseTypeName returns the native database-specific type name for a column.
+// This returns the actual type name from the database driver (e.g., "datetime2", "varchar", "int")
+// rather than a generic ODBC type mapping.
 func (r *Rows) ColumnTypeDatabaseTypeName(index int) string {
+	if index < 0 || index >= len(r.nativeTypes) {
+		return ""
+	}
+
+	// Return native type name if available
+	if r.nativeTypes[index] != "" {
+		return r.nativeTypes[index]
+	}
+
+	// Fallback to ODBC type mapping if native type not available
+	return r.odbcTypeName(index)
+}
+
+// odbcTypeName returns a generic type name based on the ODBC SQL type code.
+// This is used as a fallback when the native type name is not available.
+func (r *Rows) odbcTypeName(index int) string {
 	if index < 0 || index >= len(r.colTypes) {
 		return ""
 	}
@@ -790,8 +817,10 @@ func (r *Rows) NextResultSet() error {
 	colSizes := make([]SQLULEN, numCols)
 	decDigits := make([]SQLSMALLINT, numCols)
 	nullable := make([]SQLSMALLINT, numCols)
+	nativeTypes := make([]string, numCols)
 
 	colName := make([]byte, 256)
+	typeName := make([]byte, 256)
 	for i := SQLUSMALLINT(1); i <= SQLUSMALLINT(numCols); i++ {
 		nameLen, dataType, colSize, decDigitsVal, nullableVal, ret := DescribeCol(r.stmt.stmt, i, colName)
 		if !IsSuccess(ret) {
@@ -803,6 +832,12 @@ func (r *Rows) NextResultSet() error {
 		colSizes[i-1] = colSize
 		decDigits[i-1] = decDigitsVal
 		nullable[i-1] = nullableVal
+
+		// Get native type name using SQLColAttribute with SQL_DESC_TYPE_NAME
+		strLen, _, attrRet := ColAttribute(r.stmt.stmt, i, SQL_DESC_TYPE_NAME, typeName)
+		if IsSuccess(attrRet) && strLen > 0 {
+			nativeTypes[i-1] = string(typeName[:strLen])
+		}
 	}
 
 	r.columns = columns
@@ -810,6 +845,7 @@ func (r *Rows) NextResultSet() error {
 	r.colSizes = colSizes
 	r.decDigits = decDigits
 	r.nullable = nullable
+	r.nativeTypes = nativeTypes
 
 	return nil
 }

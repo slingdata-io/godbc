@@ -237,7 +237,7 @@ func main() {
 	log.Println("All tests passed!")
 }
 
-func runTest(db *sql.DB, _ DBType, tableName string, ddl DDLTemplates) error {
+func runTest(db *sql.DB, dbType DBType, tableName string, ddl DDLTemplates) error {
 	// Drop the table if it exists (ignore errors)
 	log.Printf("Dropping table %s if exists...", tableName)
 	_, _ = db.Exec(ddl.DropTable)
@@ -297,11 +297,38 @@ func runTest(db *sql.DB, _ DBType, tableName string, ddl DDLTemplates) error {
 	}
 	log.Printf("Columns: %v", columns)
 
-	// Validate DECIMAL precision/scale metadata
+	// Validate column type metadata including native type names
 	colTypes, err := rows.ColumnTypes()
 	if err != nil {
 		return fmt.Errorf("failed to get column types: %w", err)
 	}
+
+	// Display native type names for all columns
+	log.Println("Native column types from database driver:")
+	for _, col := range colTypes {
+		typeName := col.DatabaseTypeName()
+		length, hasLength := col.Length()
+		prec, scale, hasPrec := col.DecimalSize()
+		nullable, hasNullable := col.Nullable()
+
+		info := fmt.Sprintf("  %s: %s", col.Name(), typeName)
+		if hasLength && length > 0 {
+			info += fmt.Sprintf("(%d)", length)
+		}
+		if hasPrec && prec > 0 {
+			info += fmt.Sprintf("(%d,%d)", prec, scale)
+		}
+		if hasNullable {
+			if nullable {
+				info += " NULL"
+			} else {
+				info += " NOT NULL"
+			}
+		}
+		log.Println(info)
+	}
+
+	// Validate DECIMAL precision/scale metadata
 	for _, col := range colTypes {
 		if col.Name() == "price" {
 			prec, scale, ok := col.DecimalSize()
@@ -318,6 +345,13 @@ func runTest(db *sql.DB, _ DBType, tableName string, ddl DDLTemplates) error {
 			log.Println("  ✓ DECIMAL precision/scale metadata validated")
 		}
 	}
+
+	// Validate that native type names are returned (not just generic ODBC types)
+	log.Println("Validating native type names...")
+	if err := validateNativeTypes(dbType, colTypes); err != nil {
+		return err
+	}
+	log.Println("  ✓ Native type names validated")
 
 	// Fetch and validate rows
 	rowCount := 0
@@ -462,6 +496,93 @@ func runTest(db *sql.DB, _ DBType, tableName string, ddl DDLTemplates) error {
 		return fmt.Errorf("failed to drop table: %w", err)
 	}
 	log.Println("Table dropped successfully!")
+
+	return nil
+}
+
+// validateNativeTypes checks that the native type names match expected values for each database type
+func validateNativeTypes(dbType DBType, colTypes []*sql.ColumnType) error {
+	// Build a map of column name to type name
+	typeMap := make(map[string]string)
+	for _, col := range colTypes {
+		typeMap[col.Name()] = strings.ToLower(col.DatabaseTypeName())
+	}
+
+	// Define expected native type patterns for each database
+	// We use Contains checks since type names may include additional info
+	var expectedTypes map[string][]string
+
+	switch dbType {
+	case DBTypeSQLServer:
+		expectedTypes = map[string][]string{
+			"id":         {"int"},
+			"name":       {"varchar"},
+			"value":      {"float"},
+			"active":     {"bit"},
+			"created_at": {"datetime2"},
+			"data":       {"varbinary"},
+			"price":      {"decimal", "numeric"},
+		}
+	case DBTypePostgres:
+		expectedTypes = map[string][]string{
+			"id":         {"int4", "int", "integer"},
+			"name":       {"varchar", "character varying"},
+			"value":      {"float8", "double", "float"},
+			"active":     {"bool", "boolean"},
+			"created_at": {"timestamp"},
+			"data":       {"bytea"},
+			"price":      {"decimal", "numeric"},
+		}
+	case DBTypeMySQL:
+		expectedTypes = map[string][]string{
+			"id":         {"int"},
+			"name":       {"varchar"},
+			"value":      {"double"},
+			"active":     {"tinyint"},
+			"created_at": {"datetime"},
+			"data":       {"varbinary"},
+			"price":      {"decimal", "numeric"},
+		}
+	case DBTypeSQLite:
+		expectedTypes = map[string][]string{
+			"id":         {"integer", "int"},
+			"name":       {"text", "varchar"},
+			"value":      {"real", "float", "double"},
+			"active":     {"integer", "int"},
+			"created_at": {"text", "varchar"},
+			"data":       {"blob"},
+			"price":      {"decimal", "numeric", "text"},
+		}
+	default:
+		// For unknown databases, just verify we got non-empty type names
+		for colName, typeName := range typeMap {
+			if typeName == "" {
+				return fmt.Errorf("column %q: expected non-empty native type name", colName)
+			}
+		}
+		return nil
+	}
+
+	// Validate each column's type
+	for colName, acceptableTypes := range expectedTypes {
+		actualType, ok := typeMap[colName]
+		if !ok {
+			continue // Column not in result set
+		}
+
+		matched := false
+		for _, expected := range acceptableTypes {
+			if strings.Contains(actualType, expected) {
+				matched = true
+				break
+			}
+		}
+
+		if !matched {
+			return fmt.Errorf("column %q: native type %q does not match any expected types %v",
+				colName, actualType, acceptableTypes)
+		}
+	}
 
 	return nil
 }
