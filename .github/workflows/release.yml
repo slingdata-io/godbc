@@ -52,7 +52,8 @@ jobs:
           VERSION="${{ github.event.inputs.version }}"
           MODULE="github.com/slingdata-io/godbc"
           echo "Checking if $MODULE@$VERSION exists in Go checksum database..."
-          if curl -s "https://sum.golang.org/lookup/$MODULE@$VERSION" | grep -q "$VERSION"; then
+          RESPONSE=$(curl -s "https://sum.golang.org/lookup/$MODULE@$VERSION")
+          if echo "$RESPONSE" | grep -q "^$MODULE@$VERSION"; then
             echo "Error: $MODULE@$VERSION is already recorded in Go's checksum database"
             echo "⚠️  This version cannot be reused. You must create a new version."
             exit 1
