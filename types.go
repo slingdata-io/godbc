@@ -1,5 +1,7 @@
 package odbc
 
+import "time"
+
 // ODBC Handle types (opaque pointers)
 type SQLHANDLE uintptr
 type SQLHENV SQLHANDLE
@@ -384,4 +386,303 @@ func formatHex(val uint64, width int) []byte {
 // IsSuccess checks if the return code indicates success
 func IsSuccess(ret SQLRETURN) bool {
 	return ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO
+}
+
+// =============================================================================
+// Enhanced Type Handling Types
+// =============================================================================
+
+// TimestampPrecision specifies the fractional seconds precision for timestamps
+type TimestampPrecision int
+
+const (
+	// TimestampPrecisionSeconds provides no fractional seconds (datetime)
+	TimestampPrecisionSeconds TimestampPrecision = 0
+	// TimestampPrecisionMilliseconds provides 3 digits (default, datetime2(3))
+	TimestampPrecisionMilliseconds TimestampPrecision = 3
+	// TimestampPrecisionMicroseconds provides 6 digits (datetime2(6))
+	TimestampPrecisionMicroseconds TimestampPrecision = 6
+	// TimestampPrecisionNanoseconds provides 9 digits (max ODBC precision)
+	TimestampPrecisionNanoseconds TimestampPrecision = 9
+)
+
+// Timestamp wraps time.Time with explicit precision control
+type Timestamp struct {
+	Time      time.Time
+	Precision TimestampPrecision
+}
+
+// NewTimestamp creates a Timestamp with the specified precision
+func NewTimestamp(t time.Time, precision TimestampPrecision) Timestamp {
+	return Timestamp{Time: t, Precision: precision}
+}
+
+// WideString wraps a Go string for explicit UTF-16 (NVARCHAR/NCHAR) binding.
+// Use this when inserting into Unicode columns that require wide character encoding.
+type WideString string
+
+// Decimal represents a decimal value with explicit precision and scale.
+// Use this for precise numeric values where floating-point approximation is unacceptable.
+type Decimal struct {
+	Value     string // String representation for precision preservation
+	Precision int    // Total digits (1-38)
+	Scale     int    // Digits after decimal point (0-Precision)
+}
+
+// NewDecimal creates a Decimal from a string with validation
+func NewDecimal(value string, precision, scale int) (Decimal, error) {
+	if precision < 1 || precision > 38 {
+		return Decimal{}, newDecimalError("precision must be 1-38, got %d", precision)
+	}
+	if scale < 0 || scale > precision {
+		return Decimal{}, newDecimalError("scale must be 0-%d, got %d", precision, scale)
+	}
+	if !isValidDecimalString(value) {
+		return Decimal{}, newDecimalError("invalid decimal string: %q", value)
+	}
+	return Decimal{Value: value, Precision: precision, Scale: scale}, nil
+}
+
+// ParseDecimal parses a decimal string with automatic precision/scale detection
+func ParseDecimal(s string) (Decimal, error) {
+	if !isValidDecimalString(s) {
+		return Decimal{}, newDecimalError("invalid decimal string: %q", s)
+	}
+
+	// Remove sign for counting
+	val := s
+	if len(val) > 0 && (val[0] == '-' || val[0] == '+') {
+		val = val[1:]
+	}
+
+	// Find decimal point
+	dotIdx := -1
+	for i := 0; i < len(val); i++ {
+		if val[i] == '.' {
+			dotIdx = i
+			break
+		}
+	}
+
+	var precision, scale int
+	if dotIdx == -1 {
+		// No decimal point
+		precision = len(val)
+		scale = 0
+	} else {
+		// Has decimal point
+		intPart := val[:dotIdx]
+		fracPart := val[dotIdx+1:]
+		precision = len(intPart) + len(fracPart)
+		scale = len(fracPart)
+	}
+
+	// Handle edge cases
+	if precision == 0 {
+		precision = 1
+	}
+	if precision > 38 {
+		precision = 38
+	}
+
+	return Decimal{Value: s, Precision: precision, Scale: scale}, nil
+}
+
+// isValidDecimalString validates decimal string format
+func isValidDecimalString(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+
+	start := 0
+	if s[0] == '-' || s[0] == '+' {
+		start = 1
+	}
+
+	if start >= len(s) {
+		return false
+	}
+
+	hasDigit := false
+	hasDot := false
+
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if c >= '0' && c <= '9' {
+			hasDigit = true
+		} else if c == '.' {
+			if hasDot {
+				return false // Multiple decimal points
+			}
+			hasDot = true
+		} else {
+			return false // Invalid character
+		}
+	}
+
+	return hasDigit
+}
+
+// newDecimalError creates a formatted decimal error
+func newDecimalError(format string, args ...interface{}) error {
+	msg := format
+	if len(args) > 0 {
+		// Simple formatting for common cases
+		for _, arg := range args {
+			switch v := arg.(type) {
+			case int:
+				msg = replaceFirst(msg, "%d", formatInt(v))
+			case string:
+				msg = replaceFirst(msg, "%q", "\""+v+"\"")
+				msg = replaceFirst(msg, "%s", v)
+			}
+		}
+	}
+	return &DecimalError{Message: msg}
+}
+
+// DecimalError represents a decimal validation error
+type DecimalError struct {
+	Message string
+}
+
+func (e *DecimalError) Error() string {
+	return "decimal: " + e.Message
+}
+
+// replaceFirst replaces the first occurrence of old with new in s
+func replaceFirst(s, old, new string) string {
+	for i := 0; i <= len(s)-len(old); i++ {
+		if s[i:i+len(old)] == old {
+			return s[:i] + new + s[i+len(old):]
+		}
+	}
+	return s
+}
+
+// formatInt converts an int to string without importing strconv
+func formatInt(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	negative := n < 0
+	if negative {
+		n = -n
+	}
+	var buf [20]byte
+	pos := len(buf)
+	for n > 0 {
+		pos--
+		buf[pos] = byte('0' + n%10)
+		n /= 10
+	}
+	if negative {
+		pos--
+		buf[pos] = '-'
+	}
+	return string(buf[pos:])
+}
+
+// TimestampTZ represents a timestamp with timezone awareness
+type TimestampTZ struct {
+	Time      time.Time
+	Precision TimestampPrecision
+	TZ        *time.Location // nil means use connection default (UTC)
+}
+
+// NewTimestampTZ creates a timezone-aware timestamp
+func NewTimestampTZ(t time.Time, precision TimestampPrecision, tz *time.Location) TimestampTZ {
+	return TimestampTZ{Time: t, Precision: precision, TZ: tz}
+}
+
+// =============================================================================
+// INTERVAL Types
+// =============================================================================
+
+// SQL Interval type constants
+const (
+	SQL_INTERVAL_YEAR             SQLSMALLINT = 101
+	SQL_INTERVAL_MONTH            SQLSMALLINT = 102
+	SQL_INTERVAL_DAY              SQLSMALLINT = 103
+	SQL_INTERVAL_HOUR             SQLSMALLINT = 104
+	SQL_INTERVAL_MINUTE           SQLSMALLINT = 105
+	SQL_INTERVAL_SECOND           SQLSMALLINT = 106
+	SQL_INTERVAL_YEAR_TO_MONTH    SQLSMALLINT = 107
+	SQL_INTERVAL_DAY_TO_HOUR      SQLSMALLINT = 108
+	SQL_INTERVAL_DAY_TO_MINUTE    SQLSMALLINT = 109
+	SQL_INTERVAL_DAY_TO_SECOND    SQLSMALLINT = 110
+	SQL_INTERVAL_HOUR_TO_MINUTE   SQLSMALLINT = 111
+	SQL_INTERVAL_HOUR_TO_SECOND   SQLSMALLINT = 112
+	SQL_INTERVAL_MINUTE_TO_SECOND SQLSMALLINT = 113
+)
+
+// C Interval type identifiers (same as SQL types for intervals)
+const (
+	SQL_C_INTERVAL_YEAR             = SQL_INTERVAL_YEAR
+	SQL_C_INTERVAL_MONTH            = SQL_INTERVAL_MONTH
+	SQL_C_INTERVAL_DAY              = SQL_INTERVAL_DAY
+	SQL_C_INTERVAL_HOUR             = SQL_INTERVAL_HOUR
+	SQL_C_INTERVAL_MINUTE           = SQL_INTERVAL_MINUTE
+	SQL_C_INTERVAL_SECOND           = SQL_INTERVAL_SECOND
+	SQL_C_INTERVAL_YEAR_TO_MONTH    = SQL_INTERVAL_YEAR_TO_MONTH
+	SQL_C_INTERVAL_DAY_TO_HOUR      = SQL_INTERVAL_DAY_TO_HOUR
+	SQL_C_INTERVAL_DAY_TO_MINUTE    = SQL_INTERVAL_DAY_TO_MINUTE
+	SQL_C_INTERVAL_DAY_TO_SECOND    = SQL_INTERVAL_DAY_TO_SECOND
+	SQL_C_INTERVAL_HOUR_TO_MINUTE   = SQL_INTERVAL_HOUR_TO_MINUTE
+	SQL_C_INTERVAL_HOUR_TO_SECOND   = SQL_INTERVAL_HOUR_TO_SECOND
+	SQL_C_INTERVAL_MINUTE_TO_SECOND = SQL_INTERVAL_MINUTE_TO_SECOND
+)
+
+// SQL_YEAR_MONTH_STRUCT for year-month intervals
+type SQL_YEAR_MONTH_STRUCT struct {
+	Year  SQLUINTEGER
+	Month SQLUINTEGER
+}
+
+// SQL_DAY_SECOND_STRUCT for day-time intervals
+type SQL_DAY_SECOND_STRUCT struct {
+	Day      SQLUINTEGER
+	Hour     SQLUINTEGER
+	Minute   SQLUINTEGER
+	Second   SQLUINTEGER
+	Fraction SQLUINTEGER // billionths of a second
+}
+
+// SQL_INTERVAL_STRUCT is the ODBC interval structure
+type SQL_INTERVAL_STRUCT struct {
+	IntervalType SQLSMALLINT
+	IntervalSign SQLSMALLINT // 0 = positive, 1 = negative
+	_            [4]byte     // padding for alignment
+	YearMonth    SQL_YEAR_MONTH_STRUCT
+	DaySecond    SQL_DAY_SECOND_STRUCT
+}
+
+// IntervalYearMonth represents a year-month interval
+type IntervalYearMonth struct {
+	Years    int
+	Months   int
+	Negative bool
+}
+
+// IntervalDaySecond represents a day-time interval
+type IntervalDaySecond struct {
+	Days        int
+	Hours       int
+	Minutes     int
+	Seconds     int
+	Nanoseconds int
+	Negative    bool
+}
+
+// ToDuration converts IntervalDaySecond to time.Duration
+func (i IntervalDaySecond) ToDuration() time.Duration {
+	d := time.Duration(i.Days)*24*time.Hour +
+		time.Duration(i.Hours)*time.Hour +
+		time.Duration(i.Minutes)*time.Minute +
+		time.Duration(i.Seconds)*time.Second +
+		time.Duration(i.Nanoseconds)*time.Nanosecond
+	if i.Negative {
+		d = -d
+	}
+	return d
 }

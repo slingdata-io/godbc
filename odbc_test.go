@@ -344,7 +344,7 @@ func TestParseGUID_Invalid(t *testing.T) {
 		{"not-a-guid"},
 		{"550e8400-e29b-41d4-a716-44665544000"}, // too short
 		{"550e8400-e29b-41d4-a716-4466554400000"}, // too long
-		{"550e8400-e29b-41d4-a716-44665544000g"}, // invalid hex
+		{"550e8400-e29b-41d4-a716-44665544000g"},  // invalid hex
 	}
 
 	for _, tt := range tests {
@@ -716,5 +716,479 @@ func TestGetBufferPtr_Nil(t *testing.T) {
 	}
 	if length != 0 {
 		t.Errorf("expected length 0 for nil, got %d", length)
+	}
+}
+
+// =============================================================================
+// Enhanced Type Handling Tests
+// =============================================================================
+
+// Timestamp Precision Tests
+
+func TestTruncateFraction(t *testing.T) {
+	tests := []struct {
+		nanos     int
+		precision TimestampPrecision
+		expected  SQLUINTEGER
+	}{
+		{123456789, TimestampPrecisionSeconds, 0},
+		{123456789, TimestampPrecisionMilliseconds, 123000000},
+		{123456789, TimestampPrecisionMicroseconds, 123456000},
+		{123456789, TimestampPrecisionNanoseconds, 123456789},
+		{0, TimestampPrecisionMilliseconds, 0},
+		{999999999, TimestampPrecisionMilliseconds, 999000000},
+	}
+
+	for _, tt := range tests {
+		result := truncateFraction(tt.nanos, tt.precision)
+		if result != tt.expected {
+			t.Errorf("truncateFraction(%d, %d): expected %d, got %d", tt.nanos, tt.precision, tt.expected, result)
+		}
+	}
+}
+
+func TestTimestampColumnSize(t *testing.T) {
+	tests := []struct {
+		precision TimestampPrecision
+		expected  SQLULEN
+	}{
+		{TimestampPrecisionSeconds, 19},
+		{TimestampPrecisionMilliseconds, 23},
+		{TimestampPrecisionMicroseconds, 26},
+		{TimestampPrecisionNanoseconds, 29},
+	}
+
+	for _, tt := range tests {
+		result := timestampColumnSize(tt.precision)
+		if result != tt.expected {
+			t.Errorf("timestampColumnSize(%d): expected %d, got %d", tt.precision, tt.expected, result)
+		}
+	}
+}
+
+func TestConvertToODBC_Timestamp(t *testing.T) {
+	input := time.Date(2024, 6, 15, 14, 30, 45, 123456789, time.UTC)
+	ts := NewTimestamp(input, TimestampPrecisionMicroseconds)
+
+	buf, cType, sqlType, colSize, decDigits, _, err := convertToODBC(ts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tsStruct, ok := buf.(*SQL_TIMESTAMP_STRUCT)
+	if !ok {
+		t.Fatalf("expected *SQL_TIMESTAMP_STRUCT, got %T", buf)
+	}
+
+	// Check fraction is truncated to microseconds
+	expectedFraction := SQLUINTEGER(123456000)
+	if tsStruct.Fraction != expectedFraction {
+		t.Errorf("expected fraction %d, got %d", expectedFraction, tsStruct.Fraction)
+	}
+
+	if cType != SQL_C_TIMESTAMP {
+		t.Errorf("expected SQL_C_TIMESTAMP, got %d", cType)
+	}
+	if sqlType != SQL_TYPE_TIMESTAMP {
+		t.Errorf("expected SQL_TYPE_TIMESTAMP, got %d", sqlType)
+	}
+	if colSize != 26 {
+		t.Errorf("expected colSize 26, got %d", colSize)
+	}
+	if decDigits != 6 {
+		t.Errorf("expected decDigits 6, got %d", decDigits)
+	}
+}
+
+// UTF-16 / WideString Tests
+
+func TestStringToUTF16_ASCII(t *testing.T) {
+	result := stringToUTF16("Hello")
+	expected := []uint16{'H', 'e', 'l', 'l', 'o', 0}
+	if len(result) != len(expected) {
+		t.Fatalf("expected length %d, got %d", len(expected), len(result))
+	}
+	for i := range expected {
+		if result[i] != expected[i] {
+			t.Errorf("at index %d: expected %d, got %d", i, expected[i], result[i])
+		}
+	}
+}
+
+func TestStringToUTF16_Unicode(t *testing.T) {
+	result := stringToUTF16("中文")
+	// 中 = 0x4E2D, 文 = 0x6587, plus null terminator
+	expected := []uint16{0x4E2D, 0x6587, 0}
+	if len(result) != len(expected) {
+		t.Fatalf("expected length %d, got %d", len(expected), len(result))
+	}
+	for i := range expected {
+		if result[i] != expected[i] {
+			t.Errorf("at index %d: expected 0x%04X, got 0x%04X", i, expected[i], result[i])
+		}
+	}
+}
+
+func TestStringToUTF16_SurrogatePairs(t *testing.T) {
+	// Emoji 😀 (U+1F600) requires surrogate pairs: 0xD83D 0xDE00
+	result := stringToUTF16("😀")
+	expected := []uint16{0xD83D, 0xDE00, 0}
+	if len(result) != len(expected) {
+		t.Fatalf("expected length %d, got %d", len(expected), len(result))
+	}
+	for i := range expected {
+		if result[i] != expected[i] {
+			t.Errorf("at index %d: expected 0x%04X, got 0x%04X", i, expected[i], result[i])
+		}
+	}
+}
+
+func TestConvertToODBC_WideString(t *testing.T) {
+	input := WideString("Hello中文")
+	buf, cType, sqlType, colSize, _, indicator, err := convertToODBC(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	utf16Buf, ok := buf.([]uint16)
+	if !ok {
+		t.Fatalf("expected []uint16, got %T", buf)
+	}
+
+	// "Hello中文" = 7 characters + null terminator
+	if len(utf16Buf) != 8 {
+		t.Errorf("expected buffer length 8, got %d", len(utf16Buf))
+	}
+
+	if cType != SQL_C_WCHAR {
+		t.Errorf("expected SQL_C_WCHAR, got %d", cType)
+	}
+	if sqlType != SQL_WVARCHAR {
+		t.Errorf("expected SQL_WVARCHAR, got %d", sqlType)
+	}
+	if colSize != 7 { // Character count
+		t.Errorf("expected colSize 7, got %d", colSize)
+	}
+	if indicator != 14 { // Byte count (7 * 2)
+		t.Errorf("expected indicator 14, got %d", indicator)
+	}
+}
+
+func TestGetBufferPtr_Uint16Slice(t *testing.T) {
+	buf := []uint16{0x0048, 0x0069, 0}
+	ptr, length := getBufferPtr(buf)
+	if ptr == 0 {
+		t.Error("expected non-zero pointer")
+	}
+	if length != 6 { // 3 code units * 2 bytes
+		t.Errorf("expected length 6, got %d", length)
+	}
+}
+
+// Decimal Tests
+
+func TestNewDecimal_Valid(t *testing.T) {
+	tests := []struct {
+		value     string
+		precision int
+		scale     int
+	}{
+		{"123.45", 5, 2},
+		{"-999.99", 5, 2},
+		{"0", 1, 0},
+		{"12345678901234567890123456789012345678", 38, 0},
+	}
+
+	for _, tt := range tests {
+		d, err := NewDecimal(tt.value, tt.precision, tt.scale)
+		if err != nil {
+			t.Errorf("NewDecimal(%q, %d, %d) failed: %v", tt.value, tt.precision, tt.scale, err)
+			continue
+		}
+		if d.Value != tt.value {
+			t.Errorf("expected value %q, got %q", tt.value, d.Value)
+		}
+		if d.Precision != tt.precision {
+			t.Errorf("expected precision %d, got %d", tt.precision, d.Precision)
+		}
+		if d.Scale != tt.scale {
+			t.Errorf("expected scale %d, got %d", tt.scale, d.Scale)
+		}
+	}
+}
+
+func TestNewDecimal_InvalidPrecision(t *testing.T) {
+	_, err := NewDecimal("123", 0, 0)
+	if err == nil {
+		t.Error("expected error for precision 0")
+	}
+
+	_, err = NewDecimal("123", 39, 0)
+	if err == nil {
+		t.Error("expected error for precision 39")
+	}
+}
+
+func TestNewDecimal_InvalidScale(t *testing.T) {
+	_, err := NewDecimal("123", 5, -1)
+	if err == nil {
+		t.Error("expected error for negative scale")
+	}
+
+	_, err = NewDecimal("123", 5, 6)
+	if err == nil {
+		t.Error("expected error for scale > precision")
+	}
+}
+
+func TestParseDecimal(t *testing.T) {
+	tests := []struct {
+		input     string
+		precision int
+		scale     int
+	}{
+		{"123.45", 5, 2},
+		{"-999.99", 5, 2},
+		{"42", 2, 0},
+		{"+100", 3, 0},
+		{"0.001", 4, 3},
+	}
+
+	for _, tt := range tests {
+		d, err := ParseDecimal(tt.input)
+		if err != nil {
+			t.Errorf("ParseDecimal(%q) failed: %v", tt.input, err)
+			continue
+		}
+		if d.Precision != tt.precision {
+			t.Errorf("ParseDecimal(%q): expected precision %d, got %d", tt.input, tt.precision, d.Precision)
+		}
+		if d.Scale != tt.scale {
+			t.Errorf("ParseDecimal(%q): expected scale %d, got %d", tt.input, tt.scale, d.Scale)
+		}
+	}
+}
+
+func TestParseDecimal_Invalid(t *testing.T) {
+	invalids := []string{"", "abc", "12.34.56", "--123", "++123"}
+	for _, s := range invalids {
+		_, err := ParseDecimal(s)
+		if err == nil {
+			t.Errorf("ParseDecimal(%q) should have failed", s)
+		}
+	}
+}
+
+func TestConvertToODBC_Decimal(t *testing.T) {
+	d, _ := NewDecimal("123.45", 10, 2)
+	buf, cType, sqlType, colSize, decDigits, indicator, err := convertToODBC(d)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	b, ok := buf.([]byte)
+	if !ok {
+		t.Fatalf("expected []byte, got %T", buf)
+	}
+	// Should be null-terminated string
+	if string(b[:len(b)-1]) != "123.45" {
+		t.Errorf("expected buffer \"123.45\", got %q", string(b[:len(b)-1]))
+	}
+
+	if cType != SQL_C_CHAR {
+		t.Errorf("expected SQL_C_CHAR, got %d", cType)
+	}
+	if sqlType != SQL_DECIMAL {
+		t.Errorf("expected SQL_DECIMAL, got %d", sqlType)
+	}
+	if colSize != 10 {
+		t.Errorf("expected colSize 10, got %d", colSize)
+	}
+	if decDigits != 2 {
+		t.Errorf("expected decDigits 2, got %d", decDigits)
+	}
+	if indicator != 6 { // Length of "123.45"
+		t.Errorf("expected indicator 6, got %d", indicator)
+	}
+}
+
+// Interval Tests
+
+func TestIntervalDaySecond_ToDuration(t *testing.T) {
+	tests := []struct {
+		interval IntervalDaySecond
+		expected time.Duration
+	}{
+		{IntervalDaySecond{Days: 1}, 24 * time.Hour},
+		{IntervalDaySecond{Hours: 2, Minutes: 30}, 2*time.Hour + 30*time.Minute},
+		{IntervalDaySecond{Seconds: 90}, 90 * time.Second},
+		{IntervalDaySecond{Days: 1, Negative: true}, -24 * time.Hour},
+		{IntervalDaySecond{Nanoseconds: 1000000}, time.Millisecond},
+	}
+
+	for _, tt := range tests {
+		result := tt.interval.ToDuration()
+		if result != tt.expected {
+			t.Errorf("ToDuration() for %+v: expected %v, got %v", tt.interval, tt.expected, result)
+		}
+	}
+}
+
+func TestConvertToODBC_IntervalYearMonth(t *testing.T) {
+	i := IntervalYearMonth{Years: 2, Months: 6, Negative: false}
+	buf, cType, sqlType, _, _, _, err := convertToODBC(i)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	is, ok := buf.(*SQL_INTERVAL_STRUCT)
+	if !ok {
+		t.Fatalf("expected *SQL_INTERVAL_STRUCT, got %T", buf)
+	}
+
+	if is.IntervalType != SQL_INTERVAL_YEAR_TO_MONTH {
+		t.Errorf("expected IntervalType %d, got %d", SQL_INTERVAL_YEAR_TO_MONTH, is.IntervalType)
+	}
+	if is.IntervalSign != 0 {
+		t.Errorf("expected IntervalSign 0, got %d", is.IntervalSign)
+	}
+	if is.YearMonth.Year != 2 {
+		t.Errorf("expected Year 2, got %d", is.YearMonth.Year)
+	}
+	if is.YearMonth.Month != 6 {
+		t.Errorf("expected Month 6, got %d", is.YearMonth.Month)
+	}
+
+	if cType != SQL_C_INTERVAL_YEAR_TO_MONTH {
+		t.Errorf("expected SQL_C_INTERVAL_YEAR_TO_MONTH, got %d", cType)
+	}
+	if sqlType != SQL_INTERVAL_YEAR_TO_MONTH {
+		t.Errorf("expected SQL_INTERVAL_YEAR_TO_MONTH, got %d", sqlType)
+	}
+}
+
+func TestConvertToODBC_IntervalDaySecond(t *testing.T) {
+	i := IntervalDaySecond{Days: 5, Hours: 12, Minutes: 30, Seconds: 45, Negative: true}
+	buf, cType, sqlType, _, _, _, err := convertToODBC(i)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	is, ok := buf.(*SQL_INTERVAL_STRUCT)
+	if !ok {
+		t.Fatalf("expected *SQL_INTERVAL_STRUCT, got %T", buf)
+	}
+
+	if is.IntervalSign != 1 { // Negative
+		t.Errorf("expected IntervalSign 1 (negative), got %d", is.IntervalSign)
+	}
+	if is.DaySecond.Day != 5 {
+		t.Errorf("expected Day 5, got %d", is.DaySecond.Day)
+	}
+	if is.DaySecond.Hour != 12 {
+		t.Errorf("expected Hour 12, got %d", is.DaySecond.Hour)
+	}
+	if is.DaySecond.Minute != 30 {
+		t.Errorf("expected Minute 30, got %d", is.DaySecond.Minute)
+	}
+	if is.DaySecond.Second != 45 {
+		t.Errorf("expected Second 45, got %d", is.DaySecond.Second)
+	}
+
+	if cType != SQL_C_INTERVAL_DAY_TO_SECOND {
+		t.Errorf("expected SQL_C_INTERVAL_DAY_TO_SECOND, got %d", cType)
+	}
+	if sqlType != SQL_INTERVAL_DAY_TO_SECOND {
+		t.Errorf("expected SQL_INTERVAL_DAY_TO_SECOND, got %d", sqlType)
+	}
+}
+
+func TestGetBufferPtr_IntervalStruct(t *testing.T) {
+	is := SQL_INTERVAL_STRUCT{IntervalType: SQL_INTERVAL_DAY}
+	ptr, length := getBufferPtr(&is)
+	if ptr == 0 {
+		t.Error("expected non-zero pointer")
+	}
+	if length == 0 {
+		t.Error("expected non-zero length")
+	}
+}
+
+// TimestampTZ Tests
+
+func TestConvertToODBC_TimestampTZ(t *testing.T) {
+	loc, _ := time.LoadLocation("America/New_York")
+	input := time.Date(2024, 6, 15, 14, 30, 0, 0, loc)
+	ts := NewTimestampTZ(input, TimestampPrecisionMilliseconds, loc)
+
+	buf, cType, sqlType, _, _, _, err := convertToODBC(ts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tsStruct, ok := buf.(*SQL_TIMESTAMP_STRUCT)
+	if !ok {
+		t.Fatalf("expected *SQL_TIMESTAMP_STRUCT, got %T", buf)
+	}
+
+	// Should be converted to UTC: 14:30 EDT = 18:30 UTC
+	utcTime := input.UTC()
+	if tsStruct.Hour != SQLUSMALLINT(utcTime.Hour()) {
+		t.Errorf("expected UTC hour %d, got %d", utcTime.Hour(), tsStruct.Hour)
+	}
+
+	if cType != SQL_C_TIMESTAMP {
+		t.Errorf("expected SQL_C_TIMESTAMP, got %d", cType)
+	}
+	if sqlType != SQL_TYPE_TIMESTAMP {
+		t.Errorf("expected SQL_TYPE_TIMESTAMP, got %d", sqlType)
+	}
+}
+
+// SQL Type Name Tests for Interval Types
+
+func TestSQLTypeName_Intervals(t *testing.T) {
+	tests := []struct {
+		sqlType  SQLSMALLINT
+		expected string
+	}{
+		{SQL_INTERVAL_YEAR, "INTERVAL YEAR"},
+		{SQL_INTERVAL_MONTH, "INTERVAL MONTH"},
+		{SQL_INTERVAL_DAY, "INTERVAL DAY"},
+		{SQL_INTERVAL_HOUR, "INTERVAL HOUR"},
+		{SQL_INTERVAL_MINUTE, "INTERVAL MINUTE"},
+		{SQL_INTERVAL_SECOND, "INTERVAL SECOND"},
+		{SQL_INTERVAL_YEAR_TO_MONTH, "INTERVAL YEAR TO MONTH"},
+		{SQL_INTERVAL_DAY_TO_HOUR, "INTERVAL DAY TO HOUR"},
+		{SQL_INTERVAL_DAY_TO_MINUTE, "INTERVAL DAY TO MINUTE"},
+		{SQL_INTERVAL_DAY_TO_SECOND, "INTERVAL DAY TO SECOND"},
+		{SQL_INTERVAL_HOUR_TO_MINUTE, "INTERVAL HOUR TO MINUTE"},
+		{SQL_INTERVAL_HOUR_TO_SECOND, "INTERVAL HOUR TO SECOND"},
+		{SQL_INTERVAL_MINUTE_TO_SECOND, "INTERVAL MINUTE TO SECOND"},
+	}
+
+	for _, tt := range tests {
+		result := SQLTypeName(tt.sqlType)
+		if result != tt.expected {
+			t.Errorf("SQLTypeName(%d): expected %q, got %q", tt.sqlType, tt.expected, result)
+		}
+	}
+}
+
+// isValidDecimalString Tests
+
+func TestIsValidDecimalString(t *testing.T) {
+	valid := []string{"123", "-123", "+123", "123.45", "-0.5", "0", ".5", "5."}
+	for _, s := range valid {
+		if !isValidDecimalString(s) {
+			t.Errorf("isValidDecimalString(%q) should return true", s)
+		}
+	}
+
+	invalid := []string{"", "-", "+", "abc", "12.34.56", "1e10"}
+	for _, s := range invalid {
+		if isValidDecimalString(s) {
+			t.Errorf("isValidDecimalString(%q) should return false", s)
+		}
 	}
 }

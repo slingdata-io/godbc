@@ -35,6 +35,32 @@ func (d *Driver) OpenConnector(name string) (driver.Connector, error) {
 	return &Connector{dsn: name, driver: d}, nil
 }
 
+// OpenConnectorWithOptions returns a Connector with custom options for enhanced type handling.
+// Use this when you need to configure timezone, timestamp precision, or other options.
+//
+// Example:
+//
+//	driver := &odbc.Driver{}
+//	connector, err := driver.OpenConnectorWithOptions(
+//	    "Driver={SQL Server};Server=localhost;Database=test",
+//	    odbc.WithTimezone(time.Local),
+//	    odbc.WithTimestampPrecision(odbc.TimestampPrecisionMicroseconds),
+//	)
+func (d *Driver) OpenConnectorWithOptions(name string, opts ...ConnectorOption) (*Connector, error) {
+	if err := initODBC(); err != nil {
+		return nil, err
+	}
+	c := &Connector{
+		dsn:                       name,
+		driver:                    d,
+		DefaultTimestampPrecision: TimestampPrecisionMilliseconds, // Default
+	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c, nil
+}
+
 // Ensure Driver implements the required interfaces
 var (
 	_ driver.Driver        = (*Driver)(nil)

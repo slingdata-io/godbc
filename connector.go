@@ -4,12 +4,34 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
+	"time"
 )
 
 // Connector implements driver.Connector for efficient connection pooling
 type Connector struct {
 	dsn    string
 	driver *Driver
+
+	// Enhanced Type Handling options
+	DefaultTimezone           *time.Location     // Default timezone for timestamp retrieval (defaults to UTC)
+	DefaultTimestampPrecision TimestampPrecision // Default precision for Timestamp type (defaults to Milliseconds)
+}
+
+// ConnectorOption configures a Connector
+type ConnectorOption func(*Connector)
+
+// WithTimezone sets the default timezone for timestamp handling
+func WithTimezone(tz *time.Location) ConnectorOption {
+	return func(c *Connector) {
+		c.DefaultTimezone = tz
+	}
+}
+
+// WithTimestampPrecision sets the default timestamp precision
+func WithTimestampPrecision(precision TimestampPrecision) ConnectorOption {
+	return func(c *Connector) {
+		c.DefaultTimestampPrecision = precision
+	}
 }
 
 // Connect establishes a new connection to the database

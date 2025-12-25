@@ -12,6 +12,79 @@ import (
 // GUID represents a UUID/GUID value for use as a parameter
 type GUID [16]byte
 
+// =============================================================================
+// Timestamp Precision Helpers
+// =============================================================================
+
+// truncateFraction truncates nanoseconds to the specified precision
+func truncateFraction(nanos int, precision TimestampPrecision) SQLUINTEGER {
+	switch precision {
+	case TimestampPrecisionSeconds:
+		return 0
+	case TimestampPrecisionMilliseconds:
+		return SQLUINTEGER((nanos / 1_000_000) * 1_000_000)
+	case TimestampPrecisionMicroseconds:
+		return SQLUINTEGER((nanos / 1_000) * 1_000)
+	case TimestampPrecisionNanoseconds:
+		return SQLUINTEGER(nanos)
+	default:
+		// Default to milliseconds for backward compatibility
+		return SQLUINTEGER((nanos / 1_000_000) * 1_000_000)
+	}
+}
+
+// timestampColumnSize returns the ODBC column size for a given precision
+// Format: YYYY-MM-DD HH:MM:SS[.fractional]
+// Base size: 19 (no fractional), with fractional: 20 + precision
+func timestampColumnSize(precision TimestampPrecision) SQLULEN {
+	if precision == 0 {
+		return 19
+	}
+	return SQLULEN(20 + int(precision))
+}
+
+// =============================================================================
+// UTF-16 Conversion Helpers
+// =============================================================================
+
+// stringToUTF16 converts a UTF-8 string to UTF-16LE with null terminator
+func stringToUTF16(s string) []uint16 {
+	runes := []rune(s)
+	result := make([]uint16, 0, len(runes)+1)
+	for _, r := range runes {
+		if r > 0xFFFF {
+			// Encode as surrogate pair
+			r -= 0x10000
+			result = append(result, uint16((r>>10)+0xD800))
+			result = append(result, uint16((r&0x3FF)+0xDC00))
+		} else {
+			result = append(result, uint16(r))
+		}
+	}
+	result = append(result, 0) // Null terminator
+	return result
+}
+
+// =============================================================================
+// Interval Helpers
+// =============================================================================
+
+// boolToIntervalSign converts a boolean negative flag to ODBC interval sign
+func boolToIntervalSign(negative bool) SQLSMALLINT {
+	if negative {
+		return 1
+	}
+	return 0
+}
+
+// abs returns the absolute value of an integer
+func abs(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
 // ParseGUID parses a GUID string in the format xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 func ParseGUID(s string) (GUID, error) {
 	s = strings.ReplaceAll(s, "-", "")
@@ -143,6 +216,83 @@ func convertToODBC(value interface{}) (interface{}, SQLSMALLINT, SQLSMALLINT, SQ
 		// This matches SQL Server datetime2(3) precision
 		return ts, SQL_C_TIMESTAMP, SQL_TYPE_TIMESTAMP, 23, 3, SQLLEN(unsafe.Sizeof(*ts)), nil
 
+	// ==========================================================================
+	// Enhanced Types
+	// ==========================================================================
+
+	case Timestamp:
+		// Timestamp with explicit precision control
+		fraction := truncateFraction(v.Time.Nanosecond(), v.Precision)
+		ts := &SQL_TIMESTAMP_STRUCT{
+			Year:     SQLSMALLINT(v.Time.Year()),
+			Month:    SQLUSMALLINT(v.Time.Month()),
+			Day:      SQLUSMALLINT(v.Time.Day()),
+			Hour:     SQLUSMALLINT(v.Time.Hour()),
+			Minute:   SQLUSMALLINT(v.Time.Minute()),
+			Second:   SQLUSMALLINT(v.Time.Second()),
+			Fraction: fraction,
+		}
+		colSize := timestampColumnSize(v.Precision)
+		decDigits := SQLSMALLINT(v.Precision)
+		return ts, SQL_C_TIMESTAMP, SQL_TYPE_TIMESTAMP, colSize, decDigits, SQLLEN(unsafe.Sizeof(*ts)), nil
+
+	case TimestampTZ:
+		// Timezone-aware timestamp - convert to UTC for storage
+		t := v.Time
+		if v.TZ != nil && v.TZ != time.UTC {
+			t = t.UTC()
+		}
+		fraction := truncateFraction(t.Nanosecond(), v.Precision)
+		ts := &SQL_TIMESTAMP_STRUCT{
+			Year:     SQLSMALLINT(t.Year()),
+			Month:    SQLUSMALLINT(t.Month()),
+			Day:      SQLUSMALLINT(t.Day()),
+			Hour:     SQLUSMALLINT(t.Hour()),
+			Minute:   SQLUSMALLINT(t.Minute()),
+			Second:   SQLUSMALLINT(t.Second()),
+			Fraction: fraction,
+		}
+		colSize := timestampColumnSize(v.Precision)
+		decDigits := SQLSMALLINT(v.Precision)
+		return ts, SQL_C_TIMESTAMP, SQL_TYPE_TIMESTAMP, colSize, decDigits, SQLLEN(unsafe.Sizeof(*ts)), nil
+
+	case WideString:
+		// UTF-16 wide string for NVARCHAR/NCHAR columns
+		utf16Buf := stringToUTF16(string(v))
+		// Column size is character count (excluding null terminator)
+		charCount := len(utf16Buf) - 1
+		// Buffer size in bytes (2 bytes per code unit), excluding null terminator
+		bufBytes := charCount * 2
+		return utf16Buf, SQL_C_WCHAR, SQL_WVARCHAR, SQLULEN(charCount), 0, SQLLEN(bufBytes), nil
+
+	case Decimal:
+		// Decimal with explicit precision/scale - bind as string for maximum compatibility
+		buf := append([]byte(v.Value), 0) // Null-terminated
+		return buf, SQL_C_CHAR, SQL_DECIMAL, SQLULEN(v.Precision), SQLSMALLINT(v.Scale), SQLLEN(len(v.Value)), nil
+
+	case IntervalYearMonth:
+		// Year-month interval
+		is := &SQL_INTERVAL_STRUCT{
+			IntervalType: SQL_INTERVAL_YEAR_TO_MONTH,
+			IntervalSign: boolToIntervalSign(v.Negative),
+		}
+		is.YearMonth.Year = SQLUINTEGER(abs(v.Years))
+		is.YearMonth.Month = SQLUINTEGER(abs(v.Months))
+		return is, SQL_C_INTERVAL_YEAR_TO_MONTH, SQL_INTERVAL_YEAR_TO_MONTH, 0, 0, SQLLEN(unsafe.Sizeof(*is)), nil
+
+	case IntervalDaySecond:
+		// Day-time interval
+		is := &SQL_INTERVAL_STRUCT{
+			IntervalType: SQL_INTERVAL_DAY_TO_SECOND,
+			IntervalSign: boolToIntervalSign(v.Negative),
+		}
+		is.DaySecond.Day = SQLUINTEGER(abs(v.Days))
+		is.DaySecond.Hour = SQLUINTEGER(abs(v.Hours))
+		is.DaySecond.Minute = SQLUINTEGER(abs(v.Minutes))
+		is.DaySecond.Second = SQLUINTEGER(abs(v.Seconds))
+		is.DaySecond.Fraction = SQLUINTEGER(abs(v.Nanoseconds))
+		return is, SQL_C_INTERVAL_DAY_TO_SECOND, SQL_INTERVAL_DAY_TO_SECOND, 0, 0, SQLLEN(unsafe.Sizeof(*is)), nil
+
 	default:
 		// Try to convert to string
 		s := fmt.Sprintf("%v", v)
@@ -197,6 +347,16 @@ func getBufferPtr(buf interface{}) (uintptr, SQLLEN) {
 		return uintptr(unsafe.Pointer(v)), SQLLEN(unsafe.Sizeof(*v))
 
 	case *SQL_TIME_STRUCT:
+		return uintptr(unsafe.Pointer(v)), SQLLEN(unsafe.Sizeof(*v))
+
+	case []uint16:
+		// For wide strings (UTF-16)
+		if len(v) == 0 {
+			return 0, 0
+		}
+		return uintptr(unsafe.Pointer(&v[0])), SQLLEN(len(v) * 2)
+
+	case *SQL_INTERVAL_STRUCT:
 		return uintptr(unsafe.Pointer(v)), SQLLEN(unsafe.Sizeof(*v))
 
 	default:
@@ -255,6 +415,33 @@ func SQLTypeName(sqlType SQLSMALLINT) string {
 		return "DATETIME"
 	case SQL_GUID:
 		return "GUID"
+	// Interval types
+	case SQL_INTERVAL_YEAR:
+		return "INTERVAL YEAR"
+	case SQL_INTERVAL_MONTH:
+		return "INTERVAL MONTH"
+	case SQL_INTERVAL_DAY:
+		return "INTERVAL DAY"
+	case SQL_INTERVAL_HOUR:
+		return "INTERVAL HOUR"
+	case SQL_INTERVAL_MINUTE:
+		return "INTERVAL MINUTE"
+	case SQL_INTERVAL_SECOND:
+		return "INTERVAL SECOND"
+	case SQL_INTERVAL_YEAR_TO_MONTH:
+		return "INTERVAL YEAR TO MONTH"
+	case SQL_INTERVAL_DAY_TO_HOUR:
+		return "INTERVAL DAY TO HOUR"
+	case SQL_INTERVAL_DAY_TO_MINUTE:
+		return "INTERVAL DAY TO MINUTE"
+	case SQL_INTERVAL_DAY_TO_SECOND:
+		return "INTERVAL DAY TO SECOND"
+	case SQL_INTERVAL_HOUR_TO_MINUTE:
+		return "INTERVAL HOUR TO MINUTE"
+	case SQL_INTERVAL_HOUR_TO_SECOND:
+		return "INTERVAL HOUR TO SECOND"
+	case SQL_INTERVAL_MINUTE_TO_SECOND:
+		return "INTERVAL MINUTE TO SECOND"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", sqlType)
 	}

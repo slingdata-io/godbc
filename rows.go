@@ -163,6 +163,13 @@ func (r *Rows) getColumnData(colNum SQLUSMALLINT) (interface{}, error) {
 		return r.getTimestamp(colNum)
 	case SQL_GUID:
 		return r.getGUID(colNum)
+	// Interval types
+	case SQL_INTERVAL_YEAR, SQL_INTERVAL_MONTH, SQL_INTERVAL_YEAR_TO_MONTH:
+		return r.getIntervalYearMonth(colNum)
+	case SQL_INTERVAL_DAY, SQL_INTERVAL_HOUR, SQL_INTERVAL_MINUTE, SQL_INTERVAL_SECOND,
+		SQL_INTERVAL_DAY_TO_HOUR, SQL_INTERVAL_DAY_TO_MINUTE, SQL_INTERVAL_DAY_TO_SECOND,
+		SQL_INTERVAL_HOUR_TO_MINUTE, SQL_INTERVAL_HOUR_TO_SECOND, SQL_INTERVAL_MINUTE_TO_SECOND:
+		return r.getIntervalDaySecond(colNum)
 	default:
 		// Default to string
 		return r.getString(colNum, colSize)
@@ -545,6 +552,45 @@ func (r *Rows) getGUID(colNum SQLUSMALLINT) (interface{}, error) {
 	return guid.String(), nil
 }
 
+// getIntervalYearMonth retrieves a year-month interval value
+func (r *Rows) getIntervalYearMonth(colNum SQLUSMALLINT) (interface{}, error) {
+	var is SQL_INTERVAL_STRUCT
+	var indicator SQLLEN
+	ret := GetData(r.stmt.stmt, colNum, SQL_C_INTERVAL_YEAR_TO_MONTH, uintptr(unsafe.Pointer(&is)), SQLLEN(unsafe.Sizeof(is)), &indicator)
+	if !IsSuccess(ret) {
+		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
+	}
+	if indicator == SQLLEN(SQL_NULL_DATA) {
+		return nil, nil
+	}
+	return IntervalYearMonth{
+		Years:    int(is.YearMonth.Year),
+		Months:   int(is.YearMonth.Month),
+		Negative: is.IntervalSign != 0,
+	}, nil
+}
+
+// getIntervalDaySecond retrieves a day-time interval value
+func (r *Rows) getIntervalDaySecond(colNum SQLUSMALLINT) (interface{}, error) {
+	var is SQL_INTERVAL_STRUCT
+	var indicator SQLLEN
+	ret := GetData(r.stmt.stmt, colNum, SQL_C_INTERVAL_DAY_TO_SECOND, uintptr(unsafe.Pointer(&is)), SQLLEN(unsafe.Sizeof(is)), &indicator)
+	if !IsSuccess(ret) {
+		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
+	}
+	if indicator == SQLLEN(SQL_NULL_DATA) {
+		return nil, nil
+	}
+	return IntervalDaySecond{
+		Days:        int(is.DaySecond.Day),
+		Hours:       int(is.DaySecond.Hour),
+		Minutes:     int(is.DaySecond.Minute),
+		Seconds:     int(is.DaySecond.Second),
+		Nanoseconds: int(is.DaySecond.Fraction),
+		Negative:    is.IntervalSign != 0,
+	}, nil
+}
+
 // ColumnTypeScanType returns the Go type suitable for scanning into
 func (r *Rows) ColumnTypeScanType(index int) reflect.Type {
 	if index < 0 || index >= len(r.colTypes) {
@@ -568,6 +614,12 @@ func (r *Rows) ColumnTypeScanType(index int) reflect.Type {
 		return reflect.TypeOf([]byte{})
 	case SQL_TYPE_DATE, SQL_TYPE_TIME, SQL_TYPE_TIMESTAMP, SQL_DATETIME:
 		return reflect.TypeOf(time.Time{})
+	case SQL_INTERVAL_YEAR, SQL_INTERVAL_MONTH, SQL_INTERVAL_YEAR_TO_MONTH:
+		return reflect.TypeOf(IntervalYearMonth{})
+	case SQL_INTERVAL_DAY, SQL_INTERVAL_HOUR, SQL_INTERVAL_MINUTE, SQL_INTERVAL_SECOND,
+		SQL_INTERVAL_DAY_TO_HOUR, SQL_INTERVAL_DAY_TO_MINUTE, SQL_INTERVAL_DAY_TO_SECOND,
+		SQL_INTERVAL_HOUR_TO_MINUTE, SQL_INTERVAL_HOUR_TO_SECOND, SQL_INTERVAL_MINUTE_TO_SECOND:
+		return reflect.TypeOf(IntervalDaySecond{})
 	default:
 		return reflect.TypeOf(new(interface{})).Elem()
 	}
@@ -626,6 +678,33 @@ func (r *Rows) ColumnTypeDatabaseTypeName(index int) string {
 		return "TIMESTAMP"
 	case SQL_GUID:
 		return "GUID"
+	// Interval types
+	case SQL_INTERVAL_YEAR:
+		return "INTERVAL YEAR"
+	case SQL_INTERVAL_MONTH:
+		return "INTERVAL MONTH"
+	case SQL_INTERVAL_DAY:
+		return "INTERVAL DAY"
+	case SQL_INTERVAL_HOUR:
+		return "INTERVAL HOUR"
+	case SQL_INTERVAL_MINUTE:
+		return "INTERVAL MINUTE"
+	case SQL_INTERVAL_SECOND:
+		return "INTERVAL SECOND"
+	case SQL_INTERVAL_YEAR_TO_MONTH:
+		return "INTERVAL YEAR TO MONTH"
+	case SQL_INTERVAL_DAY_TO_HOUR:
+		return "INTERVAL DAY TO HOUR"
+	case SQL_INTERVAL_DAY_TO_MINUTE:
+		return "INTERVAL DAY TO MINUTE"
+	case SQL_INTERVAL_DAY_TO_SECOND:
+		return "INTERVAL DAY TO SECOND"
+	case SQL_INTERVAL_HOUR_TO_MINUTE:
+		return "INTERVAL HOUR TO MINUTE"
+	case SQL_INTERVAL_HOUR_TO_SECOND:
+		return "INTERVAL HOUR TO SECOND"
+	case SQL_INTERVAL_MINUTE_TO_SECOND:
+		return "INTERVAL MINUTE TO SECOND"
 	default:
 		return "UNKNOWN"
 	}
