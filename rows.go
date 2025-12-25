@@ -145,8 +145,10 @@ func (r *Rows) getColumnData(colNum SQLUSMALLINT) (interface{}, error) {
 	case SQL_NUMERIC, SQL_DECIMAL:
 		// Get as string and parse
 		return r.getString(colNum, colSize)
-	case SQL_CHAR, SQL_VARCHAR, SQL_LONGVARCHAR, SQL_WCHAR, SQL_WVARCHAR, SQL_WLONGVARCHAR:
+	case SQL_CHAR, SQL_VARCHAR, SQL_LONGVARCHAR:
 		return r.getString(colNum, colSize)
+	case SQL_WCHAR, SQL_WVARCHAR, SQL_WLONGVARCHAR:
+		return r.getWideString(colNum, colSize)
 	case SQL_BINARY, SQL_VARBINARY, SQL_LONGVARBINARY:
 		return r.getBytes(colNum, colSize)
 	case SQL_TYPE_DATE:
@@ -155,6 +157,8 @@ func (r *Rows) getColumnData(colNum SQLUSMALLINT) (interface{}, error) {
 		return r.getTime(colNum)
 	case SQL_TYPE_TIMESTAMP, SQL_DATETIME:
 		return r.getTimestamp(colNum)
+	case SQL_GUID:
+		return r.getGUID(colNum)
 	default:
 		// Default to string
 		return r.getString(colNum, colSize)
@@ -412,6 +416,114 @@ func (r *Rows) getTimestamp(colNum SQLUSMALLINT) (interface{}, error) {
 	nanos := int(ts.Fraction)
 	return time.Date(int(ts.Year), time.Month(ts.Month), int(ts.Day),
 		int(ts.Hour), int(ts.Minute), int(ts.Second), nanos, time.UTC), nil
+}
+
+// getWideString retrieves a wide character (UTF-16) string and converts to UTF-8
+func (r *Rows) getWideString(colNum SQLUSMALLINT, colSize SQLULEN) (interface{}, error) {
+	// Buffer size in UTF-16 code units (2 bytes each)
+	bufSize := int(colSize) + 1
+	if bufSize < 256 {
+		bufSize = 256
+	}
+	if bufSize > 32768 {
+		bufSize = 32768 // Cap initial buffer (in code units)
+	}
+
+	// Allocate buffer for UTF-16 data (2 bytes per code unit)
+	buf := make([]uint16, bufSize)
+	var indicator SQLLEN
+
+	ret := GetData(r.stmt.stmt, colNum, SQL_C_WCHAR, uintptr(unsafe.Pointer(&buf[0])), SQLLEN(len(buf)*2), &indicator)
+	if !IsSuccess(ret) && ret != SQL_SUCCESS_WITH_INFO {
+		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
+	}
+	if indicator == SQLLEN(SQL_NULL_DATA) {
+		return nil, nil
+	}
+
+	// Handle data truncation - need larger buffer
+	if ret == SQL_SUCCESS_WITH_INFO && indicator > SQLLEN((len(buf)-1)*2) {
+		// Reallocate and fetch remaining data
+		totalBytes := int(indicator)
+		totalUnits := totalBytes / 2
+		result := make([]uint16, 0, totalUnits)
+		// Already fetched (minus null terminator)
+		fetchedUnits := len(buf) - 1
+		result = append(result, buf[:fetchedUnits]...)
+
+		remaining := totalUnits - fetchedUnits
+		for remaining > 0 {
+			chunkUnits := remaining + 1
+			if chunkUnits > len(buf) {
+				chunkUnits = len(buf)
+			}
+			ret = GetData(r.stmt.stmt, colNum, SQL_C_WCHAR, uintptr(unsafe.Pointer(&buf[0])), SQLLEN(chunkUnits*2), &indicator)
+			if !IsSuccess(ret) && ret != SQL_SUCCESS_WITH_INFO {
+				break
+			}
+			if ret == SQL_NO_DATA || indicator == SQLLEN(SQL_NULL_DATA) {
+				break
+			}
+			copyUnits := int(indicator) / 2
+			if copyUnits > chunkUnits-1 {
+				copyUnits = chunkUnits - 1
+			}
+			result = append(result, buf[:copyUnits]...)
+			remaining -= copyUnits
+		}
+		return utf16ToString(result), nil
+	}
+
+	// Normal case - data fit in buffer
+	if indicator >= 0 {
+		numUnits := int(indicator) / 2
+		if numUnits > len(buf)-1 {
+			numUnits = len(buf) - 1
+		}
+		return utf16ToString(buf[:numUnits]), nil
+	}
+	// Find null terminator
+	for i, c := range buf {
+		if c == 0 {
+			return utf16ToString(buf[:i]), nil
+		}
+	}
+	return utf16ToString(buf), nil
+}
+
+// utf16ToString converts a UTF-16 encoded slice to a UTF-8 string
+func utf16ToString(u []uint16) string {
+	// Convert UTF-16 to runes, then to string
+	runes := make([]rune, 0, len(u))
+	for i := 0; i < len(u); i++ {
+		r := u[i]
+		if r >= 0xD800 && r <= 0xDBFF && i+1 < len(u) {
+			// High surrogate - check for low surrogate
+			r2 := u[i+1]
+			if r2 >= 0xDC00 && r2 <= 0xDFFF {
+				// Valid surrogate pair - decode to rune
+				runes = append(runes, rune(((int(r)-0xD800)<<10)+(int(r2)-0xDC00)+0x10000))
+				i++
+				continue
+			}
+		}
+		runes = append(runes, rune(r))
+	}
+	return string(runes)
+}
+
+// getGUID retrieves a GUID value as a formatted string
+func (r *Rows) getGUID(colNum SQLUSMALLINT) (interface{}, error) {
+	var guid SQL_GUID_STRUCT
+	var indicator SQLLEN
+	ret := GetData(r.stmt.stmt, colNum, SQL_C_GUID, uintptr(unsafe.Pointer(&guid)), SQLLEN(unsafe.Sizeof(guid)), &indicator)
+	if !IsSuccess(ret) {
+		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
+	}
+	if indicator == SQLLEN(SQL_NULL_DATA) {
+		return nil, nil
+	}
+	return guid.String(), nil
 }
 
 // ColumnTypeScanType returns the Go type suitable for scanning into

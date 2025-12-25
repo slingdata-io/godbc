@@ -146,7 +146,22 @@ if err != nil {
 }
 ```
 
-## Testing with the Basic Example
+## Unit Tests
+
+Run the unit tests (no database connection required):
+
+```bash
+go test -v
+```
+
+The test suite covers:
+- Type conversions (Go ↔ ODBC)
+- GUID parsing and formatting
+- UTF-16 to UTF-8 string conversion
+- Error handling utilities
+- SQL type name helpers
+
+## Integration Testing with the Basic Example
 
 The `examples/basic` directory contains a test program that validates the driver against any ODBC-compatible database. It creates a test table, inserts rows, validates the data, tests transactions, and cleans up.
 

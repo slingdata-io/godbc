@@ -1,11 +1,37 @@
 package odbc
 
 import (
+	"encoding/hex"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 	"unsafe"
 )
+
+// GUID represents a UUID/GUID value for use as a parameter
+type GUID [16]byte
+
+// ParseGUID parses a GUID string in the format xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+func ParseGUID(s string) (GUID, error) {
+	s = strings.ReplaceAll(s, "-", "")
+	if len(s) != 32 {
+		return GUID{}, fmt.Errorf("invalid GUID length: %d", len(s))
+	}
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return GUID{}, fmt.Errorf("invalid GUID hex: %w", err)
+	}
+	var g GUID
+	// GUID byte order: Data1 (4 bytes, little-endian), Data2 (2 bytes, LE), Data3 (2 bytes, LE), Data4 (8 bytes, big-endian)
+	// But in the string, it's represented as: Data1-Data2-Data3-Data4[0:2]-Data4[2:8] all big-endian
+	// We need to swap bytes for Data1, Data2, Data3
+	g[0], g[1], g[2], g[3] = b[3], b[2], b[1], b[0] // Data1 swap
+	g[4], g[5] = b[5], b[4]                         // Data2 swap
+	g[6], g[7] = b[7], b[6]                         // Data3 swap
+	copy(g[8:], b[8:])                              // Data4 stays as-is
+	return g, nil
+}
 
 // convertToODBC converts a Go value to ODBC binding parameters
 // Returns: buffer, C type, SQL type, column size, decimal digits, length indicator, error
@@ -92,6 +118,11 @@ func convertToODBC(value interface{}) (interface{}, SQLSMALLINT, SQLSMALLINT, SQ
 			return nil, SQL_C_BINARY, SQL_VARBINARY, 0, 0, 0, nil
 		}
 		return v, SQL_C_BINARY, SQL_VARBINARY, SQLULEN(len(v)), 0, SQLLEN(len(v)), nil
+
+	case GUID:
+		buf := make([]byte, 16)
+		copy(buf, v[:])
+		return buf, SQL_C_GUID, SQL_GUID, 16, 0, 16, nil
 
 	case time.Time:
 		// Convert nanoseconds to billionths, but truncate to milliseconds (3 decimal places)

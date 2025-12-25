@@ -47,7 +47,11 @@ func (c *Conn) PrepareContext(ctx context.Context, query string) (driver.Stmt, e
 
 	// Get number of parameters
 	var numParams SQLSMALLINT
-	NumParams(stmtHandle, &numParams)
+	ret = NumParams(stmtHandle, &numParams)
+	if !IsSuccess(ret) {
+		// Non-fatal: some drivers don't support NumParams, default to -1 (unknown)
+		numParams = -1
+	}
 
 	stmt := &Stmt{
 		conn:     c,
@@ -187,13 +191,15 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 			c.mu.Unlock()
 			return nil, driver.ErrBadConn
 		}
-		c.mu.Unlock()
 
 		var stmtHandle SQLHSTMT
 		ret := AllocHandle(SQL_HANDLE_STMT, SQLHANDLE(c.dbc), (*SQLHANDLE)(&stmtHandle))
 		if !IsSuccess(ret) {
-			return nil, NewError(SQL_HANDLE_DBC, SQLHANDLE(c.dbc))
+			err := NewError(SQL_HANDLE_DBC, SQLHANDLE(c.dbc))
+			c.mu.Unlock()
+			return nil, err
 		}
+		c.mu.Unlock()
 		defer FreeHandle(SQL_HANDLE_STMT, SQLHANDLE(stmtHandle))
 
 		ret = ExecDirect(stmtHandle, query)
@@ -225,13 +231,15 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 			c.mu.Unlock()
 			return nil, driver.ErrBadConn
 		}
-		c.mu.Unlock()
 
 		var stmtHandle SQLHSTMT
 		ret := AllocHandle(SQL_HANDLE_STMT, SQLHANDLE(c.dbc), (*SQLHANDLE)(&stmtHandle))
 		if !IsSuccess(ret) {
-			return nil, NewError(SQL_HANDLE_DBC, SQLHANDLE(c.dbc))
+			err := NewError(SQL_HANDLE_DBC, SQLHANDLE(c.dbc))
+			c.mu.Unlock()
+			return nil, err
 		}
+		c.mu.Unlock()
 
 		ret = ExecDirect(stmtHandle, query)
 		if !IsSuccess(ret) {

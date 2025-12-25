@@ -302,6 +302,85 @@ type SQL_NUMERIC_STRUCT struct {
 
 type SQLSCHAR int8
 
+// GUID struct for uniqueidentifier types
+type SQL_GUID_STRUCT struct {
+	Data1 uint32
+	Data2 uint16
+	Data3 uint16
+	Data4 [8]byte
+}
+
+// String returns the GUID as a formatted string (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+func (g SQL_GUID_STRUCT) String() string {
+	return sprintf("%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+		g.Data1, g.Data2, g.Data3,
+		g.Data4[0], g.Data4[1],
+		g.Data4[2], g.Data4[3], g.Data4[4], g.Data4[5], g.Data4[6], g.Data4[7])
+}
+
+// sprintf is a simple hex formatter to avoid importing fmt in types.go
+func sprintf(format string, args ...interface{}) string {
+	// Simple implementation for GUID formatting
+	result := make([]byte, 0, 36)
+	argIdx := 0
+	i := 0
+	for i < len(format) {
+		if format[i] == '%' && i+1 < len(format) {
+			width := 0
+			i++
+			// Parse width
+			for i < len(format) && format[i] >= '0' && format[i] <= '9' {
+				width = width*10 + int(format[i]-'0')
+				i++
+			}
+			if i < len(format) {
+				switch format[i] {
+				case 'X':
+					var val uint64
+					switch v := args[argIdx].(type) {
+					case uint32:
+						val = uint64(v)
+					case uint16:
+						val = uint64(v)
+					case byte:
+						val = uint64(v)
+					}
+					hex := formatHex(val, width)
+					result = append(result, hex...)
+					argIdx++
+				}
+				i++
+			}
+		} else {
+			result = append(result, format[i])
+			i++
+		}
+	}
+	return string(result)
+}
+
+func formatHex(val uint64, width int) []byte {
+	const hexDigits = "0123456789ABCDEF"
+	buf := make([]byte, 16)
+	pos := 15
+	if val == 0 {
+		buf[pos] = '0'
+		pos--
+	} else {
+		for val > 0 {
+			buf[pos] = hexDigits[val&0xF]
+			val >>= 4
+			pos--
+		}
+	}
+	// Pad with zeros
+	for 15-pos < width {
+		buf[pos] = '0'
+		pos--
+	}
+	return buf[pos+1:]
+}
+
 // IsSuccess checks if the return code indicates success
 func IsSuccess(ret SQLRETURN) bool {
 	return ret == SQL_SUCCESS || ret == SQL_SUCCESS_WITH_INFO
