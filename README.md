@@ -1,6 +1,6 @@
 # godbc
 
-Pure Go ODBC driver for `database/sql` using [purego](https://github.com/ebitengine/purego) for FFI. No CGO required.
+Pure Go ODBC driver for `database/sql` using [purego](https://github.com/ebitengine/purego) for FFI. No CGO required. Developed by [SlingData.IO](https://slingdata.io).
 
 ## Features
 
