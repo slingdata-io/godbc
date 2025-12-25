@@ -51,7 +51,8 @@ type Stmt struct {
 	namedParams *NamedParams
 }
 
-// Close closes the statement
+// Close releases all resources associated with the prepared statement.
+// It is safe to call Close multiple times; subsequent calls are no-ops.
 func (s *Stmt) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -74,12 +75,14 @@ func (s *Stmt) Close() error {
 	return nil
 }
 
-// NumInput returns the number of placeholder parameters
+// NumInput returns the number of placeholder parameters in the prepared statement.
+// Returns -1 if the driver cannot determine the count.
 func (s *Stmt) NumInput() int {
 	return s.numInput
 }
 
-// Exec executes a prepared statement (deprecated, use ExecContext)
+// Exec executes a prepared statement without returning rows.
+// Deprecated: Use ExecContext with context support instead.
 func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	namedArgs := make([]driver.NamedValue, len(args))
 	for i, arg := range args {
@@ -91,7 +94,9 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	return s.ExecContext(context.Background(), namedArgs)
 }
 
-// ExecContext executes a prepared statement with context
+// ExecContext executes a prepared statement that doesn't return rows.
+// It supports context cancellation and named/positional parameters.
+// Returns a Result with rows affected and output parameter values.
 func (s *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -166,7 +171,8 @@ func (s *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (drive
 	}, nil
 }
 
-// Query executes a prepared query (deprecated, use QueryContext)
+// Query executes a prepared statement that returns rows.
+// Deprecated: Use QueryContext with context support instead.
 func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 	namedArgs := make([]driver.NamedValue, len(args))
 	for i, arg := range args {
@@ -178,7 +184,8 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 	return s.QueryContext(context.Background(), namedArgs)
 }
 
-// QueryContext executes a prepared query with context
+// QueryContext executes a prepared statement that returns rows.
+// It supports context cancellation and named/positional parameters.
 func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

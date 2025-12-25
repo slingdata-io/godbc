@@ -98,7 +98,8 @@ func (c *Conn) PrepareContext(ctx context.Context, query string) (driver.Stmt, e
 	return stmt, nil
 }
 
-// Close closes the connection
+// Close closes the database connection, releasing all associated ODBC handles.
+// It is safe to call Close multiple times; subsequent calls are no-ops.
 func (c *Conn) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -122,12 +123,15 @@ func (c *Conn) Close() error {
 	return nil
 }
 
-// Begin starts a new transaction (deprecated, use BeginTx)
+// Begin starts a new transaction with default options.
+// Deprecated: Use BeginTx with context and options instead.
 func (c *Conn) Begin() (driver.Tx, error) {
 	return c.BeginTx(context.Background(), driver.TxOptions{})
 }
 
-// BeginTx starts a new transaction with context and options
+// BeginTx starts a new transaction with the given context and options.
+// It supports setting isolation levels and read-only mode via driver.TxOptions.
+// Returns an error if the connection is already in a transaction.
 func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -185,7 +189,9 @@ func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, e
 	return &Tx{conn: c}, nil
 }
 
-// Ping verifies the connection is still alive
+// Ping verifies the database connection is still alive.
+// It executes a simple query (SELECT 1) to check connectivity.
+// Returns driver.ErrBadConn if the connection is no longer valid.
 func (c *Conn) Ping(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -217,7 +223,9 @@ func (c *Conn) Ping(ctx context.Context) error {
 	return nil
 }
 
-// ExecContext executes a query without returning rows
+// ExecContext executes a query that doesn't return rows (INSERT, UPDATE, DELETE).
+// It supports context cancellation and query timeout. If args is empty, the query
+// is executed directly; otherwise a prepared statement is used.
 func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	// If no args, use direct execution
 	if len(args) == 0 {
@@ -288,7 +296,9 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 	return stmt.(*Stmt).ExecContext(ctx, args)
 }
 
-// QueryContext executes a query that returns rows
+// QueryContext executes a query that returns rows (SELECT).
+// It supports context cancellation and query timeout. If args is empty, the query
+// is executed directly; otherwise a prepared statement is used.
 func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	// If no args, use direct execution
 	if len(args) == 0 {
@@ -371,7 +381,8 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 	return rows, nil
 }
 
-// ResetSession is called before a connection is reused
+// ResetSession is called by database/sql before a connection is returned to the pool.
+// It verifies the connection is in a valid state (not closed, not in a transaction).
 func (c *Conn) ResetSession(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -388,7 +399,8 @@ func (c *Conn) ResetSession(ctx context.Context) error {
 	return nil
 }
 
-// IsValid returns true if the connection is valid
+// IsValid implements driver.Validator and returns true if the connection is usable.
+// Used by database/sql to check if a connection should be discarded.
 func (c *Conn) IsValid() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()

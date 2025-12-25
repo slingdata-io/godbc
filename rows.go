@@ -72,12 +72,13 @@ func newRows(stmt *Stmt, closeStmt bool) (*Rows, error) {
 	}, nil
 }
 
-// Columns returns the column names
+// Columns returns the names of all columns in the result set.
 func (r *Rows) Columns() []string {
 	return r.columns
 }
 
-// Close closes the rows iterator
+// Close closes the result set and releases associated resources.
+// It is safe to call Close multiple times; subsequent calls are no-ops.
 func (r *Rows) Close() error {
 	if r.closed {
 		return nil
@@ -95,7 +96,8 @@ func (r *Rows) Close() error {
 	return nil
 }
 
-// Next fetches the next row
+// Next advances to the next row and populates dest with column values.
+// Returns io.EOF when no more rows are available.
 func (r *Rows) Next(dest []driver.Value) error {
 	if r.closed {
 		return io.EOF
@@ -591,7 +593,8 @@ func (r *Rows) getIntervalDaySecond(colNum SQLUSMALLINT) (interface{}, error) {
 	}, nil
 }
 
-// ColumnTypeScanType returns the Go type suitable for scanning into
+// ColumnTypeScanType returns the Go type suitable for scanning column values.
+// For example, SQL_INTEGER returns int64, SQL_VARCHAR returns string.
 func (r *Rows) ColumnTypeScanType(index int) reflect.Type {
 	if index < 0 || index >= len(r.colTypes) {
 		return reflect.TypeOf(new(interface{})).Elem()
@@ -625,7 +628,8 @@ func (r *Rows) ColumnTypeScanType(index int) reflect.Type {
 	}
 }
 
-// ColumnTypeDatabaseTypeName returns the database type name
+// ColumnTypeDatabaseTypeName returns the database-specific type name for a column.
+// For example: "VARCHAR", "INTEGER", "DECIMAL", "TIMESTAMP".
 func (r *Rows) ColumnTypeDatabaseTypeName(index int) string {
 	if index < 0 || index >= len(r.colTypes) {
 		return ""
@@ -710,7 +714,8 @@ func (r *Rows) ColumnTypeDatabaseTypeName(index int) string {
 	}
 }
 
-// ColumnTypeLength returns the length of a column
+// ColumnTypeLength returns the maximum length for variable-length column types.
+// Returns ok=true for VARCHAR, VARBINARY, and similar types; ok=false for fixed types.
 func (r *Rows) ColumnTypeLength(index int) (length int64, ok bool) {
 	if index < 0 || index >= len(r.colSizes) {
 		return 0, false
@@ -724,7 +729,8 @@ func (r *Rows) ColumnTypeLength(index int) (length int64, ok bool) {
 	return 0, false
 }
 
-// ColumnTypeNullable returns whether a column is nullable
+// ColumnTypeNullable reports whether a column may be null.
+// Returns ok=false if nullability cannot be determined.
 func (r *Rows) ColumnTypeNullable(index int) (nullable, ok bool) {
 	if index < 0 || index >= len(r.nullable) {
 		return false, false
@@ -739,7 +745,9 @@ func (r *Rows) ColumnTypeNullable(index int) (nullable, ok bool) {
 	}
 }
 
-// ColumnTypePrecisionScale returns the precision and scale for NUMERIC/DECIMAL types
+// ColumnTypePrecisionScale returns precision and scale for NUMERIC/DECIMAL columns.
+// Precision is the total number of digits; scale is digits after the decimal point.
+// Returns ok=false for non-numeric types.
 func (r *Rows) ColumnTypePrecisionScale(index int) (precision, scale int64, ok bool) {
 	if index < 0 || index >= len(r.colTypes) {
 		return 0, 0, false
@@ -753,12 +761,14 @@ func (r *Rows) ColumnTypePrecisionScale(index int) (precision, scale int64, ok b
 	}
 }
 
-// HasNextResultSet checks if there are more result sets
+// HasNextResultSet reports whether there are additional result sets available.
+// Use NextResultSet to advance to the next result set.
 func (r *Rows) HasNextResultSet() bool {
 	return MoreResults(r.stmt.stmt) == SQL_SUCCESS
 }
 
-// NextResultSet advances to the next result set
+// NextResultSet advances to the next result set from a multi-result query.
+// Returns io.EOF if there are no more result sets.
 func (r *Rows) NextResultSet() error {
 	ret := MoreResults(r.stmt.stmt)
 	if ret == SQL_NO_DATA {
