@@ -13,8 +13,9 @@ type Connector struct {
 	driver *Driver
 
 	// Enhanced Type Handling options
-	DefaultTimezone           *time.Location     // Default timezone for timestamp retrieval (defaults to UTC)
-	DefaultTimestampPrecision TimestampPrecision // Default precision for Timestamp type (defaults to Milliseconds)
+	DefaultTimezone           *time.Location       // Default timezone for timestamp retrieval (defaults to UTC)
+	DefaultTimestampPrecision TimestampPrecision   // Default precision for Timestamp type (defaults to Milliseconds)
+	LastInsertIdBehavior      LastInsertIdBehavior // How to handle LastInsertId() (defaults to Auto)
 }
 
 // ConnectorOption configures a Connector
@@ -31,6 +32,13 @@ func WithTimezone(tz *time.Location) ConnectorOption {
 func WithTimestampPrecision(precision TimestampPrecision) ConnectorOption {
 	return func(c *Connector) {
 		c.DefaultTimestampPrecision = precision
+	}
+}
+
+// WithLastInsertIdBehavior sets the behavior for LastInsertId()
+func WithLastInsertIdBehavior(behavior LastInsertIdBehavior) ConnectorOption {
+	return func(c *Connector) {
+		c.LastInsertIdBehavior = behavior
 	}
 }
 
@@ -71,8 +79,14 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 
 	// Create and return the connection
 	conn := &Conn{
-		env: env,
-		dbc: dbc,
+		env:                  env,
+		dbc:                  dbc,
+		lastInsertIdBehavior: c.LastInsertIdBehavior,
+	}
+
+	// Detect database type for LastInsertId support
+	if conn.lastInsertIdBehavior == LastInsertIdAuto {
+		conn.detectDatabaseType()
 	}
 
 	return conn, nil

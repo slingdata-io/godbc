@@ -686,3 +686,162 @@ func (i IntervalDaySecond) ToDuration() time.Duration {
 	}
 	return d
 }
+
+// =============================================================================
+// Output Parameter Support
+// =============================================================================
+
+// ParamDirection specifies the direction of a parameter (input, output, or both)
+type ParamDirection int
+
+const (
+	// ParamInput is for input-only parameters (default)
+	ParamInput ParamDirection = iota
+	// ParamOutput is for output-only parameters
+	ParamOutput
+	// ParamInputOutput is for bidirectional parameters
+	ParamInputOutput
+)
+
+// OutputParam wraps a value for output or input/output parameter binding.
+// Use this type when calling stored procedures that return values through parameters.
+type OutputParam struct {
+	// Value holds the initial value (for InputOutput) or a type hint (for Output).
+	// For output-only parameters, the type of Value determines the buffer size and type.
+	// Supported types: int, int32, int64, float32, float64, string, []byte, bool, time.Time
+	Value interface{}
+
+	// Direction specifies whether this is an output or input/output parameter
+	Direction ParamDirection
+
+	// Size specifies the buffer size for variable-length types (string, []byte).
+	// If 0, a default size will be used (4000 for strings, 8000 for bytes).
+	Size int
+}
+
+// NewOutputParam creates an output-only parameter with the given type hint.
+// The type of value determines the expected output type.
+func NewOutputParam(typeHint interface{}) OutputParam {
+	return OutputParam{
+		Value:     typeHint,
+		Direction: ParamOutput,
+	}
+}
+
+// NewOutputParamWithSize creates an output-only parameter with a specific buffer size.
+// Use this for variable-length types (string, []byte) when you know the maximum size.
+func NewOutputParamWithSize(typeHint interface{}, size int) OutputParam {
+	return OutputParam{
+		Value:     typeHint,
+		Direction: ParamOutput,
+		Size:      size,
+	}
+}
+
+// NewInputOutputParam creates a bidirectional parameter with an initial value.
+func NewInputOutputParam(value interface{}) OutputParam {
+	return OutputParam{
+		Value:     value,
+		Direction: ParamInputOutput,
+	}
+}
+
+// NewInputOutputParamWithSize creates a bidirectional parameter with a specific buffer size.
+func NewInputOutputParamWithSize(value interface{}, size int) OutputParam {
+	return OutputParam{
+		Value:     value,
+		Direction: ParamInputOutput,
+		Size:      size,
+	}
+}
+
+// =============================================================================
+// Batch Operations Support
+// =============================================================================
+
+// Statement attributes for batch operations
+const (
+	SQL_ATTR_PARAM_BIND_TYPE      SQLINTEGER = 18
+	SQL_ATTR_PARAM_STATUS_PTR     SQLINTEGER = 20
+	SQL_ATTR_PARAMS_PROCESSED_PTR SQLINTEGER = 21
+	SQL_ATTR_PARAMSET_SIZE        SQLINTEGER = 22
+)
+
+// Param binding types
+const (
+	SQL_PARAM_BIND_BY_COLUMN = 0
+)
+
+// Param status values
+const (
+	SQL_PARAM_SUCCESS           = 0
+	SQL_PARAM_SUCCESS_WITH_INFO = 1
+	SQL_PARAM_ERROR             = 5
+	SQL_PARAM_UNUSED            = 7
+	SQL_PARAM_DIAG_UNAVAILABLE  = 8
+)
+
+// BatchResult holds the result of a batch execution
+type BatchResult struct {
+	// TotalRowsAffected is the sum of all rows affected across all parameter sets
+	TotalRowsAffected int64
+
+	// RowCounts contains the number of rows affected for each parameter set
+	RowCounts []int64
+
+	// Errors contains any error that occurred for each parameter set (nil if success)
+	Errors []error
+}
+
+// HasErrors returns true if any parameter set resulted in an error
+func (r *BatchResult) HasErrors() bool {
+	for _, err := range r.Errors {
+		if err != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// =============================================================================
+// Scrollable Cursor Support
+// =============================================================================
+
+// CursorType specifies the type of cursor to use for a query
+type CursorType int
+
+const (
+	// CursorForwardOnly is the default cursor type (forward-only, read-only)
+	CursorForwardOnly CursorType = iota
+	// CursorStatic creates a static snapshot of the result set
+	CursorStatic
+	// CursorKeyset uses a keyset-driven cursor
+	CursorKeyset
+	// CursorDynamic creates a fully dynamic cursor
+	CursorDynamic
+)
+
+// Cursor scrollability
+const (
+	SQL_NONSCROLLABLE = 0
+	SQL_SCROLLABLE    = 1
+)
+
+// =============================================================================
+// LastInsertId Support
+// =============================================================================
+
+// LastInsertIdBehavior specifies how LastInsertId() should behave
+type LastInsertIdBehavior int
+
+const (
+	// LastInsertIdAuto automatically detects the database type and executes
+	// the appropriate identity query after INSERT statements
+	LastInsertIdAuto LastInsertIdBehavior = iota
+
+	// LastInsertIdDisabled returns 0 for LastInsertId() (original behavior)
+	LastInsertIdDisabled
+
+	// LastInsertIdReturning expects the query to use a RETURNING clause (PostgreSQL style)
+	LastInsertIdReturning
+)

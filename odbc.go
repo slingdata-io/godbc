@@ -261,6 +261,11 @@ func Fetch(stmt SQLHSTMT) SQLRETURN {
 	return sqlFetch(stmt)
 }
 
+// FetchScroll fetches a row from the result set using scroll operations
+func FetchScroll(stmt SQLHSTMT, fetchOrientation SQLSMALLINT, fetchOffset SQLLEN) SQLRETURN {
+	return sqlFetchScroll(stmt, fetchOrientation, fetchOffset)
+}
+
 // GetData retrieves data for a single column
 func GetData(stmt SQLHSTMT, colNum SQLUSMALLINT, targetType SQLSMALLINT, targetValue uintptr, bufferLen SQLLEN, strLenOrInd *SQLLEN) SQLRETURN {
 	return sqlGetData(stmt, colNum, targetType, targetValue, bufferLen, strLenOrInd)

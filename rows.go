@@ -804,6 +804,116 @@ func (r *Rows) NextResultSet() error {
 	return nil
 }
 
+// =============================================================================
+// Scrollable Cursor Support
+// =============================================================================
+
+// ScrollableRows provides methods for scrollable cursor navigation.
+// These methods are only available when the statement was prepared with
+// PrepareWithCursor using a scrollable cursor type (CursorStatic, CursorKeyset, or CursorDynamic).
+type ScrollableRows interface {
+	driver.Rows
+	First() error
+	Last() error
+	Prior() error
+	Absolute(row int64) error
+	Relative(offset int64) error
+}
+
+// First moves the cursor to the first row
+func (r *Rows) First() error {
+	if r.closed {
+		return io.EOF
+	}
+	ret := FetchScroll(r.stmt.stmt, SQL_FETCH_FIRST, 0)
+	if ret == SQL_NO_DATA {
+		return io.EOF
+	}
+	if !IsSuccess(ret) {
+		return NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
+	}
+	return nil
+}
+
+// Last moves the cursor to the last row
+func (r *Rows) Last() error {
+	if r.closed {
+		return io.EOF
+	}
+	ret := FetchScroll(r.stmt.stmt, SQL_FETCH_LAST, 0)
+	if ret == SQL_NO_DATA {
+		return io.EOF
+	}
+	if !IsSuccess(ret) {
+		return NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
+	}
+	return nil
+}
+
+// Prior moves the cursor to the previous row
+func (r *Rows) Prior() error {
+	if r.closed {
+		return io.EOF
+	}
+	ret := FetchScroll(r.stmt.stmt, SQL_FETCH_PRIOR, 0)
+	if ret == SQL_NO_DATA {
+		return io.EOF
+	}
+	if !IsSuccess(ret) {
+		return NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
+	}
+	return nil
+}
+
+// Absolute moves the cursor to the specified row number (1-based)
+// Positive values count from the beginning, negative values count from the end.
+func (r *Rows) Absolute(row int64) error {
+	if r.closed {
+		return io.EOF
+	}
+	ret := FetchScroll(r.stmt.stmt, SQL_FETCH_ABSOLUTE, SQLLEN(row))
+	if ret == SQL_NO_DATA {
+		return io.EOF
+	}
+	if !IsSuccess(ret) {
+		return NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
+	}
+	return nil
+}
+
+// Relative moves the cursor by the specified offset from the current position
+func (r *Rows) Relative(offset int64) error {
+	if r.closed {
+		return io.EOF
+	}
+	ret := FetchScroll(r.stmt.stmt, SQL_FETCH_RELATIVE, SQLLEN(offset))
+	if ret == SQL_NO_DATA {
+		return io.EOF
+	}
+	if !IsSuccess(ret) {
+		return NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
+	}
+	return nil
+}
+
+// GetRowData retrieves the current row's data after a scroll operation
+func (r *Rows) GetRowData(dest []driver.Value) error {
+	if r.closed {
+		return io.EOF
+	}
+
+	// Get data for each column
+	for i := 0; i < len(dest); i++ {
+		val, err := r.getColumnData(SQLUSMALLINT(i + 1))
+		if err != nil {
+			return err
+		}
+		dest[i] = val
+	}
+
+	return nil
+}
+
 // Ensure Rows implements the required interfaces
 var (
 	_ driver.Rows                           = (*Rows)(nil)
@@ -813,4 +923,5 @@ var (
 	_ driver.RowsColumnTypeNullable         = (*Rows)(nil)
 	_ driver.RowsColumnTypePrecisionScale   = (*Rows)(nil)
 	_ driver.RowsNextResultSet              = (*Rows)(nil)
+	_ ScrollableRows                        = (*Rows)(nil)
 )

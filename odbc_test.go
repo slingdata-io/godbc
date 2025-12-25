@@ -1192,3 +1192,212 @@ func TestIsValidDecimalString(t *testing.T) {
 		}
 	}
 }
+
+// =============================================================================
+// Phase 3 Tests: Output Parameters, LastInsertId, Batch, Scrollable Cursors
+// =============================================================================
+
+// Output Parameter Tests
+
+func TestOutputParam_Creation(t *testing.T) {
+	// Test NewOutputParam
+	op := NewOutputParam(int64(0))
+	if op.Direction != ParamOutput {
+		t.Errorf("expected ParamOutput, got %d", op.Direction)
+	}
+	if op.Size != 0 {
+		t.Errorf("expected Size 0, got %d", op.Size)
+	}
+
+	// Test NewOutputParamWithSize
+	op2 := NewOutputParamWithSize("", 100)
+	if op2.Direction != ParamOutput {
+		t.Errorf("expected ParamOutput, got %d", op2.Direction)
+	}
+	if op2.Size != 100 {
+		t.Errorf("expected Size 100, got %d", op2.Size)
+	}
+
+	// Test NewInputOutputParam
+	op3 := NewInputOutputParam(42)
+	if op3.Direction != ParamInputOutput {
+		t.Errorf("expected ParamInputOutput, got %d", op3.Direction)
+	}
+	if op3.Value.(int) != 42 {
+		t.Errorf("expected value 42, got %v", op3.Value)
+	}
+}
+
+func TestParamDirection_Constants(t *testing.T) {
+	// Verify the constants match ODBC expectations
+	if ParamInput != 0 {
+		t.Errorf("expected ParamInput=0, got %d", ParamInput)
+	}
+	if ParamOutput != 1 {
+		t.Errorf("expected ParamOutput=1, got %d", ParamOutput)
+	}
+	if ParamInputOutput != 2 {
+		t.Errorf("expected ParamInputOutput=2, got %d", ParamInputOutput)
+	}
+}
+
+// BatchResult Tests
+
+func TestBatchResult_HasErrors(t *testing.T) {
+	// Empty batch - no errors
+	br := &BatchResult{}
+	if br.HasErrors() {
+		t.Error("expected HasErrors() to be false for empty batch")
+	}
+
+	// Batch with no errors
+	br2 := &BatchResult{
+		RowCounts: []int64{1, 1, 1},
+		Errors:    []error{nil, nil, nil},
+	}
+	if br2.HasErrors() {
+		t.Error("expected HasErrors() to be false when all errors are nil")
+	}
+
+	// Batch with one error
+	br3 := &BatchResult{
+		RowCounts: []int64{1, 0, 1},
+		Errors:    []error{nil, &Error{SQLState: "42000"}, nil},
+	}
+	if !br3.HasErrors() {
+		t.Error("expected HasErrors() to be true when one error exists")
+	}
+}
+
+// CursorType Tests
+
+func TestCursorType_Constants(t *testing.T) {
+	if CursorForwardOnly != 0 {
+		t.Errorf("expected CursorForwardOnly=0, got %d", CursorForwardOnly)
+	}
+	if CursorStatic != 1 {
+		t.Errorf("expected CursorStatic=1, got %d", CursorStatic)
+	}
+	if CursorKeyset != 2 {
+		t.Errorf("expected CursorKeyset=2, got %d", CursorKeyset)
+	}
+	if CursorDynamic != 3 {
+		t.Errorf("expected CursorDynamic=3, got %d", CursorDynamic)
+	}
+}
+
+// LastInsertIdBehavior Tests
+
+func TestLastInsertIdBehavior_Constants(t *testing.T) {
+	if LastInsertIdAuto != 0 {
+		t.Errorf("expected LastInsertIdAuto=0, got %d", LastInsertIdAuto)
+	}
+	if LastInsertIdDisabled != 1 {
+		t.Errorf("expected LastInsertIdDisabled=1, got %d", LastInsertIdDisabled)
+	}
+	if LastInsertIdReturning != 2 {
+		t.Errorf("expected LastInsertIdReturning=2, got %d", LastInsertIdReturning)
+	}
+}
+
+// isInsertStatement Tests
+
+func TestIsInsertStatement(t *testing.T) {
+	insertQueries := []string{
+		"INSERT INTO foo VALUES (1)",
+		"insert into foo values (1)",
+		"INSERT INTO foo (a, b) VALUES (?, ?)",
+		"  INSERT INTO foo VALUES (1)",
+		"\t\nINSERT INTO foo VALUES (1)",
+	}
+	for _, q := range insertQueries {
+		if !isInsertStatement(q) {
+			t.Errorf("isInsertStatement(%q) should return true", q)
+		}
+	}
+
+	nonInsertQueries := []string{
+		"SELECT * FROM foo",
+		"UPDATE foo SET a = 1",
+		"DELETE FROM foo",
+		"CREATE TABLE foo (id INT)",
+		"INSERTINTO foo VALUES (1)", // No space after INSERT
+		"",
+		"   ",
+	}
+	for _, q := range nonInsertQueries {
+		if isInsertStatement(q) {
+			t.Errorf("isInsertStatement(%q) should return false", q)
+		}
+	}
+}
+
+// Result OutputParams Tests
+
+func TestResult_OutputParams(t *testing.T) {
+	r := &Result{
+		outputParams: []interface{}{"hello", int64(42), nil},
+	}
+
+	params := r.OutputParams()
+	if len(params) != 3 {
+		t.Fatalf("expected 3 output params, got %d", len(params))
+	}
+
+	if params[0] != "hello" {
+		t.Errorf("expected params[0]=\"hello\", got %v", params[0])
+	}
+	if params[1] != int64(42) {
+		t.Errorf("expected params[1]=42, got %v", params[1])
+	}
+	if params[2] != nil {
+		t.Errorf("expected params[2]=nil, got %v", params[2])
+	}
+}
+
+func TestResult_OutputParam(t *testing.T) {
+	r := &Result{
+		outputParams: []interface{}{"hello", int64(42)},
+	}
+
+	// Valid indices
+	if r.OutputParam(0) != "hello" {
+		t.Errorf("expected OutputParam(0)=\"hello\", got %v", r.OutputParam(0))
+	}
+	if r.OutputParam(1) != int64(42) {
+		t.Errorf("expected OutputParam(1)=42, got %v", r.OutputParam(1))
+	}
+
+	// Invalid indices
+	if r.OutputParam(-1) != nil {
+		t.Errorf("expected OutputParam(-1)=nil, got %v", r.OutputParam(-1))
+	}
+	if r.OutputParam(2) != nil {
+		t.Errorf("expected OutputParam(2)=nil, got %v", r.OutputParam(2))
+	}
+}
+
+// LastInsertIdQueries Tests
+
+func TestLastInsertIdQueries(t *testing.T) {
+	// Check that known database types have queries defined
+	expectedDbs := []string{
+		"microsoft sql server",
+		"mysql",
+		"sqlite",
+	}
+
+	for _, db := range expectedDbs {
+		if _, ok := lastInsertIdQueries[db]; !ok {
+			t.Errorf("expected lastInsertIdQueries to contain %q", db)
+		}
+	}
+
+	// Check specific queries
+	if lastInsertIdQueries["mysql"] != "SELECT LAST_INSERT_ID()" {
+		t.Errorf("unexpected MySQL identity query: %s", lastInsertIdQueries["mysql"])
+	}
+	if lastInsertIdQueries["sqlite"] != "SELECT last_insert_rowid()" {
+		t.Errorf("unexpected SQLite identity query: %s", lastInsertIdQueries["sqlite"])
+	}
+}

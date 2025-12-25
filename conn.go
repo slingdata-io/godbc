@@ -4,8 +4,27 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
+	"strings"
 	"sync"
+	"unsafe"
 )
+
+// unsafePointer is a helper to get a uintptr from a pointer
+func unsafePointer(ptr *int64) unsafe.Pointer {
+	return unsafe.Pointer(ptr)
+}
+
+// lastInsertIdQueries maps database types to their identity queries
+var lastInsertIdQueries = map[string]string{
+	"microsoft sql server": "SELECT SCOPE_IDENTITY()",
+	"sql server":           "SELECT SCOPE_IDENTITY()",
+	"mysql":                "SELECT LAST_INSERT_ID()",
+	"mariadb":              "SELECT LAST_INSERT_ID()",
+	"sqlite":               "SELECT last_insert_rowid()",
+	"sqlite3":              "SELECT last_insert_rowid()",
+	// PostgreSQL uses RETURNING clause, handled separately
+	// Oracle uses RETURNING clause or sequences
+}
 
 // Conn implements driver.Conn and represents a connection to a database
 type Conn struct {
@@ -14,6 +33,10 @@ type Conn struct {
 	inTx   bool
 	mu     sync.Mutex
 	closed bool
+
+	// Database type detection for LastInsertId
+	dbType               string
+	lastInsertIdBehavior LastInsertIdBehavior
 }
 
 // Prepare prepares a statement for execution
@@ -300,6 +323,148 @@ func (c *Conn) IsValid() bool {
 func (c *Conn) CheckNamedValue(nv *driver.NamedValue) error {
 	// Use the default converter for now
 	return nil
+}
+
+// getLastInsertId executes a database-specific query to get the last inserted ID
+func (c *Conn) getLastInsertId() int64 {
+	if c.lastInsertIdBehavior != LastInsertIdAuto {
+		return 0
+	}
+
+	// Find the appropriate query for this database type
+	var query string
+
+	if dbTypeLower := strings.ToLower(c.dbType); dbTypeLower != "" {
+		for dbName, q := range lastInsertIdQueries {
+			if strings.Contains(dbTypeLower, dbName) {
+				query = q
+				break
+			}
+		}
+	}
+
+	if query == "" {
+		// No known query for this database type
+		return 0
+	}
+
+	// Execute the query
+	var stmtHandle SQLHSTMT
+	ret := AllocHandle(SQL_HANDLE_STMT, SQLHANDLE(c.dbc), (*SQLHANDLE)(&stmtHandle))
+	if !IsSuccess(ret) {
+		return 0
+	}
+	defer FreeHandle(SQL_HANDLE_STMT, SQLHANDLE(stmtHandle))
+
+	ret = ExecDirect(stmtHandle, query)
+	if !IsSuccess(ret) {
+		return 0
+	}
+
+	// Fetch the result
+	ret = Fetch(stmtHandle)
+	if !IsSuccess(ret) {
+		return 0
+	}
+
+	// Get the value
+	var value int64
+	var indicator SQLLEN
+	ret = GetData(stmtHandle, 1, SQL_C_SBIGINT, uintptr(unsafePointer(&value)), 8, &indicator)
+	if !IsSuccess(ret) || indicator == SQL_NULL_DATA {
+		return 0
+	}
+
+	return value
+}
+
+// detectDatabaseType queries the ODBC driver for the database type
+func (c *Conn) detectDatabaseType() {
+	buf := make([]byte, 256)
+	strLen, ret := GetInfo(c.dbc, SQL_DBMS_NAME, buf)
+	if IsSuccess(ret) && strLen > 0 {
+		// Find the null terminator
+		end := int(strLen)
+		if end > len(buf) {
+			end = len(buf)
+		}
+		for i := 0; i < end; i++ {
+			if buf[i] == 0 {
+				end = i
+				break
+			}
+		}
+		c.dbType = string(buf[:end])
+	}
+}
+
+// PrepareWithCursor prepares a statement with a specific cursor type.
+// Use this when you need scrollable cursors for random-access navigation.
+func (c *Conn) PrepareWithCursor(ctx context.Context, query string, cursorType CursorType) (driver.Stmt, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed {
+		return nil, driver.ErrBadConn
+	}
+
+	// Allocate statement handle
+	var stmtHandle SQLHSTMT
+	ret := AllocHandle(SQL_HANDLE_STMT, SQLHANDLE(c.dbc), (*SQLHANDLE)(&stmtHandle))
+	if !IsSuccess(ret) {
+		return nil, NewError(SQL_HANDLE_DBC, SQLHANDLE(c.dbc))
+	}
+
+	// Set cursor type
+	var odbcCursorType uintptr
+	switch cursorType {
+	case CursorStatic:
+		odbcCursorType = SQL_CURSOR_STATIC
+	case CursorKeyset:
+		odbcCursorType = SQL_CURSOR_KEYSET_DRIVEN
+	case CursorDynamic:
+		odbcCursorType = SQL_CURSOR_DYNAMIC
+	default:
+		odbcCursorType = SQL_CURSOR_FORWARD_ONLY
+	}
+
+	ret = SetStmtAttr(stmtHandle, SQL_ATTR_CURSOR_TYPE, odbcCursorType, 0)
+	if !IsSuccess(ret) {
+		// Non-fatal: cursor type may not be supported
+	}
+
+	// Set scrollable if not forward-only
+	if cursorType != CursorForwardOnly {
+		ret = SetStmtAttr(stmtHandle, SQL_ATTR_CURSOR_SCROLLABLE, SQL_SCROLLABLE, 0)
+		if !IsSuccess(ret) {
+			// Non-fatal: scrollable cursors may not be supported
+		}
+	}
+
+	// Prepare the statement
+	ret = Prepare(stmtHandle, query)
+	if !IsSuccess(ret) {
+		err := NewError(SQL_HANDLE_STMT, SQLHANDLE(stmtHandle))
+		FreeHandle(SQL_HANDLE_STMT, SQLHANDLE(stmtHandle))
+		return nil, err
+	}
+
+	// Get number of parameters
+	var numParams SQLSMALLINT
+	ret = NumParams(stmtHandle, &numParams)
+	if !IsSuccess(ret) {
+		numParams = -1
+	}
+
+	stmt := &Stmt{
+		conn:       c,
+		stmt:       stmtHandle,
+		query:      query,
+		numInput:   int(numParams),
+		cursorType: cursorType,
+	}
+
+	return stmt, nil
 }
 
 // Ensure Conn implements the required interfaces
