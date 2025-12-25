@@ -8,6 +8,10 @@ import (
 	"unsafe"
 )
 
+// maxFetchIterations limits the number of iterations when fetching truncated data
+// to prevent infinite loops if the ODBC driver misbehaves.
+const maxFetchIterations = 1000
+
 // Rows implements driver.Rows for result set iteration
 type Rows struct {
 	stmt      *Stmt
@@ -285,7 +289,12 @@ func (r *Rows) getString(colNum SQLUSMALLINT, colSize SQLULEN) (interface{}, err
 		result = append(result, buf[:len(buf)-1]...) // Already fetched (minus null terminator)
 
 		remaining := totalLen - (len(buf) - 1)
+		iterations := 0
 		for remaining > 0 {
+			iterations++
+			if iterations > maxFetchIterations {
+				break // Prevent infinite loop on driver bugs
+			}
 			chunkSize := remaining + 1
 			if chunkSize > len(buf) {
 				chunkSize = len(buf)
@@ -348,7 +357,12 @@ func (r *Rows) getBytes(colNum SQLUSMALLINT, colSize SQLULEN) (interface{}, erro
 		result = append(result, buf...)
 
 		remaining := totalLen - len(buf)
+		iterations := 0
 		for remaining > 0 {
+			iterations++
+			if iterations > maxFetchIterations {
+				break // Prevent infinite loop on driver bugs
+			}
 			chunkSize := remaining
 			if chunkSize > len(buf) {
 				chunkSize = len(buf)
@@ -452,7 +466,12 @@ func (r *Rows) getWideString(colNum SQLUSMALLINT, colSize SQLULEN) (interface{},
 		result = append(result, buf[:fetchedUnits]...)
 
 		remaining := totalUnits - fetchedUnits
+		iterations := 0
 		for remaining > 0 {
+			iterations++
+			if iterations > maxFetchIterations {
+				break // Prevent infinite loop on driver bugs
+			}
 			chunkUnits := remaining + 1
 			if chunkUnits > len(buf) {
 				chunkUnits = len(buf)

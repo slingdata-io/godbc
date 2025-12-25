@@ -1,6 +1,7 @@
 package odbc
 
 import (
+	"fmt"
 	"os"
 	"runtime"
 	"sync"
@@ -53,8 +54,14 @@ var (
 	sqlColumns        func(stmt SQLHSTMT, catalogName *byte, nameLen1 SQLSMALLINT, schemaName *byte, nameLen2 SQLSMALLINT, tableName *byte, nameLen3 SQLSMALLINT, columnName *byte, nameLen4 SQLSMALLINT) SQLRETURN
 )
 
-// getLibraryPath returns the platform-specific ODBC library path
+// getLibraryPath returns the platform-specific ODBC library path.
+// The GODBC_LIBRARY_PATH environment variable can override the default path.
 func getLibraryPath() string {
+	// Check environment variable first
+	if path := os.Getenv("GODBC_LIBRARY_PATH"); path != "" {
+		return path
+	}
+
 	switch runtime.GOOS {
 	case "windows":
 		return "odbc32.dll"
@@ -78,14 +85,16 @@ func getLibraryPath() string {
 	}
 }
 
-// initODBC initializes the ODBC library and registers all functions
+// initODBC initializes the ODBC library and registers all functions.
+// If loading fails, set GODBC_LIBRARY_PATH to specify a custom library location.
 func initODBC() error {
 	initOnce.Do(func() {
 		libPath := getLibraryPath()
-		
+
 		// Use platform-specific library loading (implemented in odbc_windows.go and odbc_unix.go)
 		odbcLib, initErr = loadODBCLibrary(libPath)
 		if initErr != nil {
+			initErr = fmt.Errorf("failed to load ODBC library %q: %w (set GODBC_LIBRARY_PATH to override)", libPath, initErr)
 			return
 		}
 

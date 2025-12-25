@@ -3,8 +3,12 @@ package odbc
 import (
 	"context"
 	"database/sql/driver"
+	"fmt"
 	"sync"
 )
+
+// maxParameters limits the number of parameters to prevent unbounded memory allocation.
+const maxParameters = 10000
 
 // Stmt implements driver.Stmt for prepared statements
 type Stmt struct {
@@ -148,7 +152,13 @@ func (s *Stmt) bindParams(args []driver.NamedValue) error {
 // bindParam binds a single parameter
 func (s *Stmt) bindParam(paramNum SQLUSMALLINT, value interface{}) error {
 	idx := int(paramNum) - 1
-	if idx < 0 || idx >= len(s.paramBuffers) {
+	if idx < 0 {
+		return fmt.Errorf("invalid parameter number %d: must be positive", paramNum)
+	}
+	if idx >= maxParameters {
+		return fmt.Errorf("parameter number %d exceeds maximum %d", paramNum, maxParameters)
+	}
+	if idx >= len(s.paramBuffers) {
 		// Extend slices if needed
 		for len(s.paramBuffers) <= idx {
 			s.paramBuffers = append(s.paramBuffers, nil)

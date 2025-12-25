@@ -558,6 +558,72 @@ func TestIsDataTruncation(t *testing.T) {
 	}
 }
 
+func TestIsRetryable(t *testing.T) {
+	tests := []struct {
+		err      error
+		expected bool
+	}{
+		// Connection errors are retryable
+		{&Error{SQLState: "08001"}, true},
+		{&Error{SQLState: "08S01"}, true},
+		// Deadlock is retryable
+		{&Error{SQLState: "40001"}, true},
+		// Timeout is retryable
+		{&Error{SQLState: "HYT00"}, true},
+		{&Error{SQLState: "HYT01"}, true},
+		// Transaction failed is retryable
+		{&Error{SQLState: "40003"}, true},
+		// Syntax errors are not retryable
+		{&Error{SQLState: "42S02"}, false},
+		{&Error{SQLState: "42000"}, false},
+		// Constraint violations are not retryable
+		{&Error{SQLState: "23000"}, false},
+		// Success states are not retryable
+		{&Error{SQLState: "00000"}, false},
+		// Nil is not retryable
+		{nil, false},
+		// Errors slice with connection error
+		{Errors{{SQLState: "08001"}}, true},
+		// Errors slice with non-retryable error
+		{Errors{{SQLState: "42S02"}}, false},
+	}
+
+	for _, tt := range tests {
+		result := IsRetryable(tt.err)
+		if result != tt.expected {
+			t.Errorf("IsRetryable(%v): expected %v, got %v", tt.err, tt.expected, result)
+		}
+	}
+}
+
+func TestError_Is(t *testing.T) {
+	err1 := &Error{SQLState: "42S02", NativeError: 208, Message: "Table not found"}
+	err2 := &Error{SQLState: "42S02", NativeError: 100, Message: "Different message"}
+	err3 := &Error{SQLState: "08001", NativeError: 0, Message: "Connection error"}
+
+	// Same SQLState should match
+	if !err1.Is(err2) {
+		t.Error("expected err1.Is(err2) to be true (same SQLState)")
+	}
+
+	// Different SQLState should not match
+	if err1.Is(err3) {
+		t.Error("expected err1.Is(err3) to be false (different SQLState)")
+	}
+
+	// Non-Error type should not match
+	if err1.Is(nil) {
+		t.Error("expected err1.Is(nil) to be false")
+	}
+}
+
+func TestError_Unwrap(t *testing.T) {
+	err := &Error{SQLState: "42S02", NativeError: 208, Message: "Test"}
+	if err.Unwrap() != nil {
+		t.Error("expected Unwrap to return nil")
+	}
+}
+
 // =============================================================================
 // IsSuccess Tests (types.go)
 // =============================================================================

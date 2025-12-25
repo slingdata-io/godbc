@@ -207,6 +207,45 @@ go build ./examples/basic/
 
 The example auto-detects the database type from the DSN and uses appropriate DDL syntax for SQL Server, PostgreSQL, MySQL, SQLite, and Oracle.
 
+## Troubleshooting
+
+### ODBC Library Not Found
+
+If you get an error about the ODBC library not being found, set `GODBC_LIBRARY_PATH` to specify a custom library location:
+
+```bash
+# macOS
+export GODBC_LIBRARY_PATH=/opt/homebrew/lib/libodbc.2.dylib
+
+# Linux
+export GODBC_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/libodbc.so.2
+```
+
+### Known Limitations
+
+- **LastInsertId()**: Always returns 0. ODBC does not have a standard way to retrieve the last inserted ID. Use database-specific queries like `SELECT @@IDENTITY` (SQL Server), `SELECT lastval()` (PostgreSQL), or `SELECT LAST_INSERT_ID()` (MySQL).
+
+- **Timestamp precision**: Timestamps are truncated to millisecond precision for database compatibility. Nanosecond precision is not preserved.
+
+- **DECIMAL/NUMERIC**: Returned as strings to preserve full precision. Use a decimal library like [shopspring/decimal](https://github.com/shopspring/decimal) for arithmetic.
+
+### Error Handling
+
+The driver provides helper functions for error classification:
+
+```go
+import "github.com/slingdata-io/godbc"
+
+if err := db.Ping(); err != nil {
+    if odbc.IsConnectionError(err) {
+        // Handle connection failure
+    }
+    if odbc.IsRetryable(err) {
+        // Retry the operation
+    }
+}
+```
+
 ## License
 
 MIT License - see LICENSE file
