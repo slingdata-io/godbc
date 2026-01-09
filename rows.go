@@ -12,6 +12,13 @@ import (
 // to prevent infinite loops if the ODBC driver misbehaves.
 const maxFetchIterations = 1000
 
+// isNullIndicator checks if an SQLLEN indicator value represents NULL.
+// Some ODBC drivers return -1 as a 32-bit value that gets zero-extended to 64-bit
+// (0xFFFFFFFF = 4294967295 instead of -1), so we check for both.
+func isNullIndicator(indicator SQLLEN) bool {
+	return indicator == SQLLEN(SQL_NULL_DATA) || indicator == 0xFFFFFFFF
+}
+
 // Rows implements driver.Rows for result set iteration
 type Rows struct {
 	stmt        *Stmt
@@ -144,7 +151,7 @@ func (r *Rows) getColumnData(colNum SQLUSMALLINT) (interface{}, error) {
 	colSize := r.colSizes[idx]
 
 	switch colType {
-	case SQL_BIT:
+	case SQL_BIT, SQL_BOOLEAN:
 		return r.getBool(colNum)
 	case SQL_TINYINT:
 		return r.getInt8(colNum)
@@ -195,7 +202,9 @@ func (r *Rows) getBool(colNum SQLUSMALLINT) (interface{}, error) {
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if indicator == SQLLEN(SQL_NULL_DATA) {
+	// Check for NULL - some ODBC drivers return -1 as a 32-bit value that gets
+	// zero-extended to 64-bit (0xFFFFFFFF = 4294967295 instead of -1)
+	if isNullIndicator(indicator) {
 		return nil, nil
 	}
 	return value != 0, nil
@@ -208,7 +217,7 @@ func (r *Rows) getInt8(colNum SQLUSMALLINT) (interface{}, error) {
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if indicator == SQLLEN(SQL_NULL_DATA) {
+	if isNullIndicator(indicator) {
 		return nil, nil
 	}
 	return int64(value), nil
@@ -221,7 +230,7 @@ func (r *Rows) getInt16(colNum SQLUSMALLINT) (interface{}, error) {
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if indicator == SQLLEN(SQL_NULL_DATA) {
+	if isNullIndicator(indicator) {
 		return nil, nil
 	}
 	return int64(value), nil
@@ -234,7 +243,7 @@ func (r *Rows) getInt32(colNum SQLUSMALLINT) (interface{}, error) {
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if indicator == SQLLEN(SQL_NULL_DATA) {
+	if isNullIndicator(indicator) {
 		return nil, nil
 	}
 	return int64(value), nil
@@ -247,7 +256,7 @@ func (r *Rows) getInt64(colNum SQLUSMALLINT) (interface{}, error) {
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if indicator == SQLLEN(SQL_NULL_DATA) {
+	if isNullIndicator(indicator) {
 		return nil, nil
 	}
 	return value, nil
@@ -260,7 +269,7 @@ func (r *Rows) getFloat32(colNum SQLUSMALLINT) (interface{}, error) {
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if indicator == SQLLEN(SQL_NULL_DATA) {
+	if isNullIndicator(indicator) {
 		return nil, nil
 	}
 	return float64(value), nil
@@ -273,7 +282,7 @@ func (r *Rows) getFloat64(colNum SQLUSMALLINT) (interface{}, error) {
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if indicator == SQLLEN(SQL_NULL_DATA) {
+	if isNullIndicator(indicator) {
 		return nil, nil
 	}
 	return value, nil
@@ -296,7 +305,7 @@ func (r *Rows) getString(colNum SQLUSMALLINT, colSize SQLULEN) (interface{}, err
 	if !IsSuccess(ret) && ret != SQL_SUCCESS_WITH_INFO {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if indicator == SQLLEN(SQL_NULL_DATA) {
+	if isNullIndicator(indicator) {
 		return nil, nil
 	}
 
@@ -322,7 +331,7 @@ func (r *Rows) getString(colNum SQLUSMALLINT, colSize SQLULEN) (interface{}, err
 			if !IsSuccess(ret) && ret != SQL_SUCCESS_WITH_INFO {
 				break
 			}
-			if ret == SQL_NO_DATA || indicator == SQLLEN(SQL_NULL_DATA) {
+			if ret == SQL_NO_DATA || isNullIndicator(indicator) {
 				break
 			}
 			copyLen := int(indicator)
@@ -365,7 +374,7 @@ func (r *Rows) getBytes(colNum SQLUSMALLINT, colSize SQLULEN) (interface{}, erro
 	if !IsSuccess(ret) && ret != SQL_SUCCESS_WITH_INFO {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if indicator == SQLLEN(SQL_NULL_DATA) {
+	if isNullIndicator(indicator) {
 		return nil, nil
 	}
 
@@ -390,7 +399,7 @@ func (r *Rows) getBytes(colNum SQLUSMALLINT, colSize SQLULEN) (interface{}, erro
 			if !IsSuccess(ret) && ret != SQL_SUCCESS_WITH_INFO {
 				break
 			}
-			if ret == SQL_NO_DATA || indicator == SQLLEN(SQL_NULL_DATA) {
+			if ret == SQL_NO_DATA || isNullIndicator(indicator) {
 				break
 			}
 			copyLen := int(indicator)
@@ -416,7 +425,7 @@ func (r *Rows) getDate(colNum SQLUSMALLINT) (interface{}, error) {
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if indicator == SQLLEN(SQL_NULL_DATA) {
+	if isNullIndicator(indicator) {
 		return nil, nil
 	}
 	return time.Date(int(date.Year), time.Month(date.Month), int(date.Day), 0, 0, 0, 0, time.UTC), nil
@@ -429,7 +438,7 @@ func (r *Rows) getTime(colNum SQLUSMALLINT) (interface{}, error) {
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if indicator == SQLLEN(SQL_NULL_DATA) {
+	if isNullIndicator(indicator) {
 		return nil, nil
 	}
 	return time.Date(0, 1, 1, int(t.Hour), int(t.Minute), int(t.Second), 0, time.UTC), nil
@@ -442,7 +451,7 @@ func (r *Rows) getTimestamp(colNum SQLUSMALLINT) (interface{}, error) {
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if indicator == SQLLEN(SQL_NULL_DATA) {
+	if isNullIndicator(indicator) {
 		return nil, nil
 	}
 	// Fraction is in billionths of a second, convert to nanoseconds
@@ -470,7 +479,7 @@ func (r *Rows) getWideString(colNum SQLUSMALLINT, colSize SQLULEN) (interface{},
 	if !IsSuccess(ret) && ret != SQL_SUCCESS_WITH_INFO {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if indicator == SQLLEN(SQL_NULL_DATA) {
+	if isNullIndicator(indicator) {
 		return nil, nil
 	}
 
@@ -499,7 +508,7 @@ func (r *Rows) getWideString(colNum SQLUSMALLINT, colSize SQLULEN) (interface{},
 			if !IsSuccess(ret) && ret != SQL_SUCCESS_WITH_INFO {
 				break
 			}
-			if ret == SQL_NO_DATA || indicator == SQLLEN(SQL_NULL_DATA) {
+			if ret == SQL_NO_DATA || isNullIndicator(indicator) {
 				break
 			}
 			copyUnits := int(indicator) / 2
@@ -558,7 +567,7 @@ func (r *Rows) getGUID(colNum SQLUSMALLINT) (interface{}, error) {
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if indicator == SQLLEN(SQL_NULL_DATA) {
+	if isNullIndicator(indicator) {
 		return nil, nil
 	}
 	return guid.String(), nil
@@ -572,7 +581,7 @@ func (r *Rows) getIntervalYearMonth(colNum SQLUSMALLINT) (interface{}, error) {
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if indicator == SQLLEN(SQL_NULL_DATA) {
+	if isNullIndicator(indicator) {
 		return nil, nil
 	}
 	return IntervalYearMonth{
@@ -590,7 +599,7 @@ func (r *Rows) getIntervalDaySecond(colNum SQLUSMALLINT) (interface{}, error) {
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if indicator == SQLLEN(SQL_NULL_DATA) {
+	if isNullIndicator(indicator) {
 		return nil, nil
 	}
 	return IntervalDaySecond{
