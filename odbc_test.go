@@ -160,30 +160,38 @@ func TestConvertToODBC_Floats(t *testing.T) {
 }
 
 func TestConvertToODBC_String(t *testing.T) {
+	// Strings are bound as UTF-16 (SQL_C_WCHAR/SQL_WVARCHAR) for Unicode
+	// support across all databases. See convert.go string case.
 	input := "hello world"
 	buf, cType, sqlType, colSize, _, indicator, err := convertToODBC(input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	b, ok := buf.([]byte)
+	b, ok := buf.([]uint16)
 	if !ok {
-		t.Fatalf("expected []byte, got %T", buf)
+		t.Fatalf("expected []uint16, got %T", buf)
 	}
-	// Should be null-terminated
-	if string(b) != input+"\x00" {
-		t.Errorf("expected %q, got %q", input+"\x00", string(b))
+	// Should be null-terminated UTF-16
+	if utf16ToString(b[:len(b)-1]) != input {
+		t.Errorf("expected %q, got %q", input, utf16ToString(b[:len(b)-1]))
 	}
-	if cType != SQL_C_CHAR {
-		t.Errorf("expected SQL_C_CHAR, got %d", cType)
+	if b[len(b)-1] != 0 {
+		t.Errorf("expected null terminator, got %d", b[len(b)-1])
 	}
-	if sqlType != SQL_VARCHAR {
-		t.Errorf("expected SQL_VARCHAR, got %d", sqlType)
+	if cType != SQL_C_WCHAR {
+		t.Errorf("expected SQL_C_WCHAR, got %d", cType)
 	}
-	if colSize != SQLULEN(len(input)) {
-		t.Errorf("expected colSize %d, got %d", len(input), colSize)
+	if sqlType != SQL_WVARCHAR {
+		t.Errorf("expected SQL_WVARCHAR, got %d", sqlType)
 	}
-	if indicator != SQLLEN(len(input)) {
-		t.Errorf("expected indicator %d, got %d", len(input), indicator)
+	// colSize is the UTF-16 code-unit count (excluding null terminator)
+	charCount := len(b) - 1
+	if colSize != SQLULEN(charCount) {
+		t.Errorf("expected colSize %d, got %d", charCount, colSize)
+	}
+	// indicator is the byte count (2 bytes per code unit, excluding terminator)
+	if indicator != SQLLEN(charCount*2) {
+		t.Errorf("expected indicator %d, got %d", charCount*2, indicator)
 	}
 }
 
@@ -1623,15 +1631,18 @@ func TestAllocateColumnArray_Strings(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
-	if result.CType != SQL_C_CHAR {
-		t.Errorf("expected SQL_C_CHAR, got %d", result.CType)
+	// Strings are bound as UTF-16 (SQL_C_WCHAR). See convert.go string case.
+	if result.CType != SQL_C_WCHAR {
+		t.Errorf("expected SQL_C_WCHAR, got %d", result.CType)
 	}
-	// Element size should accommodate the longest string + null terminator
-	if result.ElemSize < 6 { // "hello" = 5 + 1
-		t.Errorf("expected elemSize >= 6, got %d", result.ElemSize)
+	// Element size accommodates the longest string + null terminator,
+	// at 2 bytes per UTF-16 code unit: ("hello" = 5 + 1) * 2 = 12.
+	if result.ElemSize < 12 {
+		t.Errorf("expected elemSize >= 12, got %d", result.ElemSize)
 	}
-	if result.Lengths[0] != 5 {
-		t.Errorf("expected length 5 for 'hello', got %d", result.Lengths[0])
+	// Length is the byte count excluding the null terminator: 5 * 2 = 10.
+	if result.Lengths[0] != 10 {
+		t.Errorf("expected length 10 for 'hello', got %d", result.Lengths[0])
 	}
 	if result.Lengths[2] != SQL_NULL_DATA {
 		t.Errorf("expected NULL_DATA at index 2")
