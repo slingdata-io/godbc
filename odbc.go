@@ -211,16 +211,34 @@ func GetInfo(dbc SQLHDBC, infoType SQLUSMALLINT, infoValue []byte) (stringLength
 	return strLen, ret
 }
 
-// ExecDirect executes an SQL statement directly
+// ExecDirect executes an SQL statement directly.
+//
+// The statement text length is passed explicitly rather than SQL_NTS. Some
+// Linux ODBC driver managers/drivers mishandle SQL_NTS for SQLExecDirect and
+// scan the string with a bogus length, corrupting a stack buffer (observed as
+// "*** stack smashing detected ***" / SIGABRT). Passing the explicit byte
+// length is the spec-recommended, robust path. See issue #2.
 func ExecDirect(stmt SQLHSTMT, query string) SQLRETURN {
-	queryBytes := append([]byte(query), 0)
-	return sqlExecDirect(stmt, &queryBytes[0], SQLINTEGER(SQL_NTS))
+	b := []byte(query)
+	if len(b) == 0 {
+		// Keep a valid non-nil pointer; length 0 is well-defined.
+		b = []byte{0}
+		return sqlExecDirect(stmt, &b[0], 0)
+	}
+	return sqlExecDirect(stmt, &b[0], SQLINTEGER(len(b)))
 }
 
-// Prepare prepares an SQL statement for execution
+// Prepare prepares an SQL statement for execution.
+//
+// The statement text length is passed explicitly rather than SQL_NTS for the
+// same reason as ExecDirect (see issue #2).
 func Prepare(stmt SQLHSTMT, query string) SQLRETURN {
-	queryBytes := append([]byte(query), 0)
-	return sqlPrepare(stmt, &queryBytes[0], SQLINTEGER(SQL_NTS))
+	b := []byte(query)
+	if len(b) == 0 {
+		b = []byte{0}
+		return sqlPrepare(stmt, &b[0], 0)
+	}
+	return sqlPrepare(stmt, &b[0], SQLINTEGER(len(b)))
 }
 
 // Execute executes a prepared statement
