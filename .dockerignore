@@ -1,0 +1,6 @@
+# Used by examples/issue2-docker (build context is the repo root). Keeps the
+# Docker build context lean — no git history or local binaries.
+.git
+*.test
+examples/basic/basic
+examples/issue2-docker/issue2

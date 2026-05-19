@@ -330,6 +330,33 @@ export GODBC_LIBRARY_PATH=/opt/homebrew/lib/libodbc.2.dylib
 export GODBC_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/libodbc.so.2
 ```
 
+### Debug FFI Tracing
+
+Set `GODBC_DEBUG=1` to trace every ODBC FFI call. Each native call is logged
+to stderr *before* control enters the C driver, including its arguments
+(handles, pointers, lengths, and a hex/ASCII dump of statement text and the
+connection string with the password masked):
+
+```bash
+GODBC_DEBUG=1 ./your-app 2> godbc-trace.log
+```
+
+Example output:
+
+```
+time=... level=DEBUG msg="ffi call" fn=SQLExecDirect stmt=0x7f... textLen=8 query="SELECT 1" buffer="len=9 ptr=0x... 00000000 53 45 4c 45 43 54 20 31 00 \"SELECT 1.\""
+```
+
+There is intentionally **no post-call log line**. If the driver crashes the
+process (for example `*** stack smashing detected ***` / SIGABRT), the **last
+logged call is the one that crashed**, and its arguments are on that line.
+Records are written via `log/slog` and fsync'd immediately, so the final line
+survives a C-side `abort()` that never returns to Go.
+
+This is zero-overhead unless `GODBC_DEBUG=1`. When filing a bug, attach the
+trace — the connection-string password is redacted (`PWD=***`), but review the
+log before sharing.
+
 ### Known Limitations
 
 - **LastInsertId()**: Always returns 0. ODBC does not have a standard way to retrieve the last inserted ID. Use database-specific queries like `SELECT @@IDENTITY` (SQL Server), `SELECT lastval()` (PostgreSQL), or `SELECT LAST_INSERT_ID()` (MySQL).

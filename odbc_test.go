@@ -1736,3 +1736,28 @@ func TestWithQueryTimeout(t *testing.T) {
 		t.Errorf("expected 5s timeout, got %v", connector.QueryTimeout)
 	}
 }
+
+// TestCStmtText verifies the statement buffer passed to
+// SQLExecDirect/SQLPrepare is NUL-terminated (so drivers that strlen the
+// text don't read past the allocation) while the reported length excludes
+// the terminator (per the ODBC spec).
+func TestCStmtText(t *testing.T) {
+	cases := []string{"", "SELECT 1", "SELECT 'héllo', 世界", "SELECT * FROM t WHERE x = ?"}
+	for _, q := range cases {
+		buf, n := cStmtText(q)
+		if int(n) != len(q) {
+			t.Errorf("%q: textLen = %d, want %d (must exclude NUL terminator)", q, n, len(q))
+		}
+		if len(buf) != len(q)+1 {
+			t.Fatalf("%q: buffer len = %d, want %d (text + NUL)", q, len(buf), len(q)+1)
+		}
+		if buf[len(buf)-1] != 0 {
+			t.Errorf("%q: buffer is not NUL-terminated (last byte = %d)", q, buf[len(buf)-1])
+		}
+		if string(buf[:len(q)]) != q {
+			t.Errorf("%q: buffer text = %q, want %q", q, string(buf[:len(q)]), q)
+		}
+		// &buf[0] must be valid even for the empty-query case.
+		_ = &buf[0]
+	}
+}

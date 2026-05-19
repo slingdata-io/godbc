@@ -161,16 +161,25 @@ func initODBC() error {
 
 // AllocHandle allocates an ODBC handle
 func AllocHandle(handleType SQLSMALLINT, inputHandle SQLHANDLE, outputHandle *SQLHANDLE) SQLRETURN {
+	logger.Debug("SQLAllocHandle",
+		"type", handleTypeName(handleType),
+		"in", fmt.Sprintf("%#x", uintptr(inputHandle)))
 	return sqlAllocHandle(handleType, inputHandle, outputHandle)
 }
 
 // FreeHandle frees an ODBC handle
 func FreeHandle(handleType SQLSMALLINT, handle SQLHANDLE) SQLRETURN {
+	logger.Debug("SQLFreeHandle",
+		"type", handleTypeName(handleType),
+		"handle", fmt.Sprintf("%#x", uintptr(handle)))
 	return sqlFreeHandle(handleType, handle)
 }
 
 // SetEnvAttr sets an environment attribute
 func SetEnvAttr(env SQLHENV, attribute SQLINTEGER, value uintptr, stringLength SQLINTEGER) SQLRETURN {
+	logger.Debug("SQLSetEnvAttr",
+		"env", fmt.Sprintf("%#x", uintptr(env)),
+		"attr", attribute, "value", fmt.Sprintf("%#x", value), "strLen", stringLength)
 	return sqlSetEnvAttr(env, attribute, value, stringLength)
 }
 
@@ -184,75 +193,105 @@ func DriverConnect(dbc SQLHDBC, hwnd uintptr, inConnStr string, outConnStr []byt
 		outPtr = &outConnStr[0]
 		outMax = SQLSMALLINT(len(outConnStr))
 	}
+	logger.Debug("SQLDriverConnect",
+		"dbc", fmt.Sprintf("%#x", uintptr(dbc)),
+		"inLen", "SQL_NTS", "outMax", outMax, "completion", driverCompletion,
+		"inConnStr", debugHex(append([]byte(debugMaskConnStr(inConnStr)), 0)))
 	ret = sqlDriverConnect(dbc, hwnd, &inBytes[0], SQLSMALLINT(SQL_NTS), outPtr, outMax, &outLenPtr, driverCompletion)
 	return outLenPtr, ret
 }
 
 // Disconnect disconnects from a data source
 func Disconnect(dbc SQLHDBC) SQLRETURN {
+	logger.Debug("SQLDisconnect", "dbc", fmt.Sprintf("%#x", uintptr(dbc)))
 	return sqlDisconnect(dbc)
 }
 
 // SetConnectAttr sets a connection attribute
 func SetConnectAttr(dbc SQLHDBC, attribute SQLINTEGER, value uintptr, stringLength SQLINTEGER) SQLRETURN {
+	logger.Debug("SQLSetConnectAttr",
+		"dbc", fmt.Sprintf("%#x", uintptr(dbc)),
+		"attr", attribute, "value", fmt.Sprintf("%#x", value), "strLen", stringLength)
 	return sqlSetConnectAttr(dbc, attribute, value, stringLength)
 }
 
 // GetInfo retrieves driver/data source information
 func GetInfo(dbc SQLHDBC, infoType SQLUSMALLINT, infoValue []byte) (stringLength SQLSMALLINT, ret SQLRETURN) {
 	var strLen SQLSMALLINT
+	logger.Debug("SQLGetInfo", "phase", "size", "dbc", fmt.Sprintf("%#x", uintptr(dbc)), "infoType", infoType)
 	ret = sqlGetInfo(dbc, infoType, uintptr(0), 0, &strLen)
 	if !IsSuccess(ret) {
 		return 0, ret
 	}
 	if len(infoValue) > 0 {
+		logger.Debug("SQLGetInfo", "phase", "data",
+			"dbc", fmt.Sprintf("%#x", uintptr(dbc)),
+			"infoType", infoType, "bufLen", len(infoValue))
 		ret = sqlGetInfo(dbc, infoType, uintptr(unsafe.Pointer(&infoValue[0])), SQLSMALLINT(len(infoValue)), &strLen)
 	}
 	return strLen, ret
 }
 
+// cStmtText converts a query string into a NUL-terminated byte buffer suitable
+// for passing to SQLExecDirect/SQLPrepare, along with the text length to
+// report (the byte length of the statement text, excluding the terminating
+// NUL).
+//
+// The buffer is deliberately NUL-terminated even though an explicit TextLength
+// is also passed. This is defensive hardening: a driver that ignores
+// TextLength and instead strlen()s the statement text (a pattern seen in some
+// ODBC drivers) would otherwise read past a non-terminated Go slice. Adding
+// the terminator is spec-compliant — the reported length still excludes it —
+// and harmless for well-behaved drivers.
+func cStmtText(query string) (buf []byte, textLen SQLINTEGER) {
+	b := make([]byte, len(query)+1)
+	copy(b, query)
+	// b[len(query)] is already 0 from make's zero-fill.
+	return b, SQLINTEGER(len(query))
+}
+
 // ExecDirect executes an SQL statement directly.
 //
-// The statement text length is passed explicitly rather than SQL_NTS. Some
-// Linux ODBC driver managers/drivers mishandle SQL_NTS for SQLExecDirect and
-// scan the string with a bogus length, corrupting a stack buffer (observed as
-// "*** stack smashing detected ***" / SIGABRT). Passing the explicit byte
-// length is the spec-recommended, robust path. See issue #2.
+// The statement text length is passed explicitly rather than SQL_NTS, and the
+// underlying buffer is NUL-terminated to be robust against Linux drivers that
+// strlen the text regardless. See cStmtText.
 func ExecDirect(stmt SQLHSTMT, query string) SQLRETURN {
-	b := []byte(query)
-	if len(b) == 0 {
-		// Keep a valid non-nil pointer; length 0 is well-defined.
-		b = []byte{0}
-		return sqlExecDirect(stmt, &b[0], 0)
-	}
-	return sqlExecDirect(stmt, &b[0], SQLINTEGER(len(b)))
+	b, n := cStmtText(query)
+	logger.Debug("SQLExecDirect",
+		"stmt", fmt.Sprintf("%#x", uintptr(stmt)),
+		"textLen", n, "query", query, "buffer", debugHex(b))
+	return sqlExecDirect(stmt, &b[0], n)
 }
 
 // Prepare prepares an SQL statement for execution.
 //
-// The statement text length is passed explicitly rather than SQL_NTS for the
-// same reason as ExecDirect (see issue #2).
+// The statement text length is passed explicitly and the buffer is
+// NUL-terminated for the same reason as ExecDirect. See cStmtText.
 func Prepare(stmt SQLHSTMT, query string) SQLRETURN {
-	b := []byte(query)
-	if len(b) == 0 {
-		b = []byte{0}
-		return sqlPrepare(stmt, &b[0], 0)
-	}
-	return sqlPrepare(stmt, &b[0], SQLINTEGER(len(b)))
+	b, n := cStmtText(query)
+	logger.Debug("SQLPrepare",
+		"stmt", fmt.Sprintf("%#x", uintptr(stmt)),
+		"textLen", n, "query", query, "buffer", debugHex(b))
+	return sqlPrepare(stmt, &b[0], n)
 }
 
 // Execute executes a prepared statement
 func Execute(stmt SQLHSTMT) SQLRETURN {
+	logger.Debug("SQLExecute", "stmt", fmt.Sprintf("%#x", uintptr(stmt)))
 	return sqlExecute(stmt)
 }
 
 // NumResultCols returns the number of columns in a result set
 func NumResultCols(stmt SQLHSTMT, columnCount *SQLSMALLINT) SQLRETURN {
+	logger.Debug("SQLNumResultCols", "stmt", fmt.Sprintf("%#x", uintptr(stmt)))
 	return sqlNumResultCols(stmt, columnCount)
 }
 
 // DescribeCol describes a column in a result set
 func DescribeCol(stmt SQLHSTMT, colNum SQLUSMALLINT, colName []byte) (nameLen SQLSMALLINT, dataType SQLSMALLINT, colSize SQLULEN, decDigits SQLSMALLINT, nullable SQLSMALLINT, ret SQLRETURN) {
+	logger.Debug("SQLDescribeCol",
+		"stmt", fmt.Sprintf("%#x", uintptr(stmt)),
+		"col", colNum, "nameBufLen", len(colName))
 	ret = sqlDescribeCol(stmt, colNum, &colName[0], SQLSMALLINT(len(colName)), &nameLen, &dataType, &colSize, &decDigits, &nullable)
 	return
 }
@@ -265,72 +304,106 @@ func ColAttribute(stmt SQLHSTMT, colNum SQLUSMALLINT, fieldId SQLUSMALLINT, char
 		charPtr = uintptr(unsafe.Pointer(&charAttr[0]))
 		bufLen = SQLSMALLINT(len(charAttr))
 	}
+	logger.Debug("SQLColAttribute",
+		"stmt", fmt.Sprintf("%#x", uintptr(stmt)),
+		"col", colNum, "field", fieldId, "bufLen", bufLen,
+		"ptr", fmt.Sprintf("%#x", charPtr))
 	ret = sqlColAttribute(stmt, colNum, fieldId, charPtr, bufLen, &strLen, &numAttr)
 	return
 }
 
 // BindParameter binds a parameter to a statement
 func BindParameter(stmt SQLHSTMT, paramNum SQLUSMALLINT, ioType SQLSMALLINT, valueType SQLSMALLINT, paramType SQLSMALLINT, colSize SQLULEN, decDigits SQLSMALLINT, paramValue uintptr, bufferLen SQLLEN, strLenOrInd *SQLLEN) SQLRETURN {
+	logger.Debug("SQLBindParameter",
+		"stmt", fmt.Sprintf("%#x", uintptr(stmt)),
+		"param", paramNum, "io", ioType, "valueType", valueType, "paramType", paramType,
+		"colSize", colSize, "dec", decDigits,
+		"value", fmt.Sprintf("%#x", paramValue), "bufLen", bufferLen)
 	return sqlBindParameter(stmt, paramNum, ioType, valueType, paramType, colSize, decDigits, paramValue, bufferLen, strLenOrInd)
 }
 
 // Fetch fetches the next row from the result set
 func Fetch(stmt SQLHSTMT) SQLRETURN {
+	logger.Debug("SQLFetch", "stmt", fmt.Sprintf("%#x", uintptr(stmt)))
 	return sqlFetch(stmt)
 }
 
 // FetchScroll fetches a row from the result set using scroll operations
 func FetchScroll(stmt SQLHSTMT, fetchOrientation SQLSMALLINT, fetchOffset SQLLEN) SQLRETURN {
+	logger.Debug("SQLFetchScroll",
+		"stmt", fmt.Sprintf("%#x", uintptr(stmt)),
+		"orient", fetchOrientation, "offset", fetchOffset)
 	return sqlFetchScroll(stmt, fetchOrientation, fetchOffset)
 }
 
 // GetData retrieves data for a single column
 func GetData(stmt SQLHSTMT, colNum SQLUSMALLINT, targetType SQLSMALLINT, targetValue uintptr, bufferLen SQLLEN, strLenOrInd *SQLLEN) SQLRETURN {
+	logger.Debug("SQLGetData",
+		"stmt", fmt.Sprintf("%#x", uintptr(stmt)),
+		"col", colNum, "targetType", targetType,
+		"target", fmt.Sprintf("%#x", targetValue), "bufLen", bufferLen)
 	return sqlGetData(stmt, colNum, targetType, targetValue, bufferLen, strLenOrInd)
 }
 
 // RowCount returns the number of rows affected by an UPDATE, INSERT, or DELETE
 func RowCount(stmt SQLHSTMT, rowCount *SQLLEN) SQLRETURN {
+	logger.Debug("SQLRowCount", "stmt", fmt.Sprintf("%#x", uintptr(stmt)))
 	return sqlRowCount(stmt, rowCount)
 }
 
 // NumParams returns the number of parameters in a prepared statement
 func NumParams(stmt SQLHSTMT, paramCount *SQLSMALLINT) SQLRETURN {
+	logger.Debug("SQLNumParams", "stmt", fmt.Sprintf("%#x", uintptr(stmt)))
 	return sqlNumParams(stmt, paramCount)
 }
 
 // GetDiagRec retrieves diagnostic records
 func GetDiagRec(handleType SQLSMALLINT, handle SQLHANDLE, recNum SQLSMALLINT, sqlState []byte, message []byte) (nativeError SQLINTEGER, msgLen SQLSMALLINT, ret SQLRETURN) {
+	logger.Debug("SQLGetDiagRec",
+		"type", handleTypeName(handleType),
+		"handle", fmt.Sprintf("%#x", uintptr(handle)),
+		"rec", recNum, "msgBufLen", len(message))
 	ret = sqlGetDiagRec(handleType, handle, recNum, &sqlState[0], &nativeError, &message[0], SQLSMALLINT(len(message)), &msgLen)
 	return
 }
 
 // EndTran commits or rolls back a transaction
 func EndTran(handleType SQLSMALLINT, handle SQLHANDLE, completionType SQLSMALLINT) SQLRETURN {
+	logger.Debug("SQLEndTran",
+		"type", handleTypeName(handleType),
+		"handle", fmt.Sprintf("%#x", uintptr(handle)), "completion", completionType)
 	return sqlEndTran(handleType, handle, completionType)
 }
 
 // CloseCursor closes an open cursor
 func CloseCursor(stmt SQLHSTMT) SQLRETURN {
+	logger.Debug("SQLCloseCursor", "stmt", fmt.Sprintf("%#x", uintptr(stmt)))
 	return sqlCloseCursor(stmt)
 }
 
 // Cancel cancels a statement execution
 func Cancel(stmt SQLHSTMT) SQLRETURN {
+	logger.Debug("SQLCancel", "stmt", fmt.Sprintf("%#x", uintptr(stmt)))
 	return sqlCancel(stmt)
 }
 
 // FreeStmt frees resources associated with a statement
 func FreeStmt(stmt SQLHSTMT, option SQLUSMALLINT) SQLRETURN {
+	logger.Debug("SQLFreeStmt",
+		"stmt", fmt.Sprintf("%#x", uintptr(stmt)), "option", option)
 	return sqlFreeStmt(stmt, option)
 }
 
 // MoreResults checks for more result sets
 func MoreResults(stmt SQLHSTMT) SQLRETURN {
+	logger.Debug("SQLMoreResults", "stmt", fmt.Sprintf("%#x", uintptr(stmt)))
 	return sqlMoreResults(stmt)
 }
 
 // SetStmtAttr sets a statement attribute
 func SetStmtAttr(stmt SQLHSTMT, attribute SQLINTEGER, value uintptr, stringLength SQLINTEGER) SQLRETURN {
+	logger.Debug("SQLSetStmtAttr",
+		"stmt", fmt.Sprintf("%#x", uintptr(stmt)),
+		"attr", attribute, "value", fmt.Sprintf("%#x", value), "strLen", stringLength)
 	return sqlSetStmtAttr(stmt, attribute, value, stringLength)
 }
