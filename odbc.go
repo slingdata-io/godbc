@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"unsafe"
 
@@ -28,6 +29,7 @@ var (
 	sqlGetConnectAttr func(dbc SQLHDBC, attribute SQLINTEGER, value uintptr, bufferLength SQLINTEGER, stringLength *SQLINTEGER) SQLRETURN
 	sqlGetInfo        func(dbc SQLHDBC, infoType SQLUSMALLINT, infoValue uintptr, bufferLength SQLSMALLINT, stringLength *SQLSMALLINT) SQLRETURN
 	sqlExecDirect     func(stmt SQLHSTMT, stmtText *byte, textLength SQLINTEGER) SQLRETURN
+	sqlExecDirectW    func(stmt SQLHSTMT, stmtText *uint16, textLength SQLINTEGER) SQLRETURN
 	sqlPrepare        func(stmt SQLHSTMT, stmtText *byte, textLength SQLINTEGER) SQLRETURN
 	sqlExecute        func(stmt SQLHSTMT) SQLRETURN
 	sqlNumResultCols  func(stmt SQLHSTMT, columnCount *SQLSMALLINT) SQLRETURN
@@ -137,6 +139,7 @@ func initODBC() error {
 			purego.RegisterLibFunc(&sqlTables, odbcLib, "SQLTables")
 			purego.RegisterLibFunc(&sqlColumns, odbcLib, "SQLColumns")
 		}
+		purego.RegisterLibFunc(&sqlExecDirectW, odbcLib, "SQLExecDirectW")
 		purego.RegisterLibFunc(&sqlExecute, odbcLib, "SQLExecute")
 		purego.RegisterLibFunc(&sqlNumResultCols, odbcLib, "SQLNumResultCols")
 		purego.RegisterLibFunc(&sqlBindCol, odbcLib, "SQLBindCol")
@@ -250,17 +253,87 @@ func cStmtText(query string) (buf []byte, textLen SQLINTEGER) {
 	return b, SQLINTEGER(len(query))
 }
 
+// execMode selects which ODBC entry point ExecDirect dispatches to.
+//
+// The default (execModeDirect) calls SQLExecDirect, which on Unix resolves to
+// the unsuffixed ANSI symbol and on Windows to SQLExecDirectA. The other modes
+// exist as an escape hatch for environments where SQLExecDirect itself appears
+// broken (see issue #2): callers can set GODBC_EXEC_MODE to route around it
+// without rebuilding.
+type execMode int
+
+const (
+	execModeDirect   execMode = iota // SQLExecDirect (default; SQLExecDirectA on Windows)
+	execModeDirectA                  // explicit ANSI variant (same as default on Unix)
+	execModeDirectW                  // UTF-16 wide variant (SQLExecDirectW)
+	execModePrepExec                 // SQLPrepare + SQLExecute
+)
+
+var currentExecMode = parseExecMode(os.Getenv("GODBC_EXEC_MODE"))
+
+// parseExecMode maps the GODBC_EXEC_MODE env var to an execMode. Unknown or
+// empty values fall back to execModeDirect.
+func parseExecMode(s string) execMode {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "directa", "direct_a", "a":
+		return execModeDirectA
+	case "directw", "direct_w", "w":
+		return execModeDirectW
+	case "prepexec", "prep_exec", "prepare_execute", "prepare+execute":
+		return execModePrepExec
+	default:
+		return execModeDirect
+	}
+}
+
 // ExecDirect executes an SQL statement directly.
 //
 // The statement text length is passed explicitly rather than SQL_NTS, and the
 // underlying buffer is NUL-terminated to be robust against Linux drivers that
 // strlen the text regardless. See cStmtText.
+//
+// The ODBC entry point used is selected by GODBC_EXEC_MODE (see execMode).
 func ExecDirect(stmt SQLHSTMT, query string) SQLRETURN {
-	b, n := cStmtText(query)
-	logger.Debug("SQLExecDirect",
-		"stmt", fmt.Sprintf("%#x", uintptr(stmt)),
-		"textLen", n, "query", query, "buffer", debugHex(b))
-	return sqlExecDirect(stmt, &b[0], n)
+	return execDirectVia(stmt, query, currentExecMode)
+}
+
+// execDirectVia is the testable core of ExecDirect — it dispatches to the
+// requested ODBC entry point. Split out so unit tests can exercise each branch
+// without touching the package-level env-derived mode.
+func execDirectVia(stmt SQLHSTMT, query string, mode execMode) SQLRETURN {
+	switch mode {
+	case execModeDirectW:
+		w := stringToUTF16(query)
+		// stringToUTF16 returns a NUL-terminated buffer; textLen is the code-unit
+		// count excluding the terminator, matching the spec for SQLExecDirectW.
+		n := SQLINTEGER(len(w) - 1)
+		logger.Debug("SQLExecDirectW",
+			"stmt", fmt.Sprintf("%#x", uintptr(stmt)),
+			"textLen", n, "query", query, "codeUnits", len(w))
+		return sqlExecDirectW(stmt, &w[0], n)
+
+	case execModePrepExec:
+		b, n := cStmtText(query)
+		logger.Debug("SQLPrepare",
+			"stmt", fmt.Sprintf("%#x", uintptr(stmt)),
+			"textLen", n, "query", query, "buffer", debugHex(b),
+			"via", "GODBC_EXEC_MODE=prepexec")
+		ret := sqlPrepare(stmt, &b[0], n)
+		if !IsSuccess(ret) {
+			return ret
+		}
+		logger.Debug("SQLExecute",
+			"stmt", fmt.Sprintf("%#x", uintptr(stmt)),
+			"via", "GODBC_EXEC_MODE=prepexec")
+		return sqlExecute(stmt)
+
+	default: // execModeDirect, execModeDirectA
+		b, n := cStmtText(query)
+		logger.Debug("SQLExecDirect",
+			"stmt", fmt.Sprintf("%#x", uintptr(stmt)),
+			"textLen", n, "query", query, "buffer", debugHex(b))
+		return sqlExecDirect(stmt, &b[0], n)
+	}
 }
 
 // Prepare prepares an SQL statement for execution.

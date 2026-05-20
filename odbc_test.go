@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 // =============================================================================
@@ -1735,6 +1736,170 @@ func TestWithQueryTimeout(t *testing.T) {
 	if connector.QueryTimeout != 5*time.Second {
 		t.Errorf("expected 5s timeout, got %v", connector.QueryTimeout)
 	}
+}
+
+// TestParseExecMode verifies that GODBC_EXEC_MODE values map to the right
+// execMode, with unknown/empty values falling back to execModeDirect.
+func TestParseExecMode(t *testing.T) {
+	cases := []struct {
+		in   string
+		want execMode
+	}{
+		{"", execModeDirect},
+		{"direct", execModeDirect},
+		{"   ", execModeDirect},
+		{"unknown", execModeDirect},
+		{"directA", execModeDirectA},
+		{"DIRECTA", execModeDirectA},
+		{"direct_a", execModeDirectA},
+		{"a", execModeDirectA},
+		{"directW", execModeDirectW},
+		{"DirectW", execModeDirectW},
+		{"direct_w", execModeDirectW},
+		{"w", execModeDirectW},
+		{"prepexec", execModePrepExec},
+		{"PrepExec", execModePrepExec},
+		{"prep_exec", execModePrepExec},
+		{"prepare_execute", execModePrepExec},
+		{"prepare+execute", execModePrepExec},
+		{"  prepexec  ", execModePrepExec},
+	}
+	for _, c := range cases {
+		got := parseExecMode(c.in)
+		if got != c.want {
+			t.Errorf("parseExecMode(%q) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+// TestExecDirectViaDispatch verifies that execDirectVia routes to the correct
+// underlying FFI function pointer based on the mode. The function pointers are
+// stubbed for the test and restored afterwards.
+func TestExecDirectViaDispatch(t *testing.T) {
+	origDirect := sqlExecDirect
+	origDirectW := sqlExecDirectW
+	origPrepare := sqlPrepare
+	origExecute := sqlExecute
+	t.Cleanup(func() {
+		sqlExecDirect = origDirect
+		sqlExecDirectW = origDirectW
+		sqlPrepare = origPrepare
+		sqlExecute = origExecute
+	})
+
+	type callRecord struct {
+		direct, directW, prepare, execute int
+		lastQuery                         string
+		lastWQuery                        string
+		lastTextLen                       SQLINTEGER
+		lastWTextLen                      SQLINTEGER
+	}
+
+	reset := func() *callRecord {
+		rec := &callRecord{}
+		sqlExecDirect = func(stmt SQLHSTMT, text *byte, textLen SQLINTEGER) SQLRETURN {
+			rec.direct++
+			rec.lastTextLen = textLen
+			// Read back the buffer using the reported length to verify the
+			// dispatch passed the right text.
+			b := unsafe.Slice(text, int(textLen))
+			rec.lastQuery = string(b)
+			return SQL_SUCCESS
+		}
+		sqlExecDirectW = func(stmt SQLHSTMT, text *uint16, textLen SQLINTEGER) SQLRETURN {
+			rec.directW++
+			rec.lastWTextLen = textLen
+			u := unsafe.Slice(text, int(textLen))
+			rec.lastWQuery = utf16ToString(u)
+			return SQL_SUCCESS
+		}
+		sqlPrepare = func(stmt SQLHSTMT, text *byte, textLen SQLINTEGER) SQLRETURN {
+			rec.prepare++
+			rec.lastTextLen = textLen
+			b := unsafe.Slice(text, int(textLen))
+			rec.lastQuery = string(b)
+			return SQL_SUCCESS
+		}
+		sqlExecute = func(stmt SQLHSTMT) SQLRETURN {
+			rec.execute++
+			return SQL_SUCCESS
+		}
+		return rec
+	}
+
+	const q = "SELECT 1"
+
+	t.Run("direct", func(t *testing.T) {
+		rec := reset()
+		if ret := execDirectVia(SQLHSTMT(0), q, execModeDirect); ret != SQL_SUCCESS {
+			t.Fatalf("got ret %d, want SQL_SUCCESS", ret)
+		}
+		if rec.direct != 1 || rec.directW != 0 || rec.prepare != 0 || rec.execute != 0 {
+			t.Errorf("call counts wrong: %+v", rec)
+		}
+		if rec.lastQuery != q {
+			t.Errorf("got query %q, want %q", rec.lastQuery, q)
+		}
+		if int(rec.lastTextLen) != len(q) {
+			t.Errorf("got textLen %d, want %d", rec.lastTextLen, len(q))
+		}
+	})
+
+	t.Run("directA", func(t *testing.T) {
+		rec := reset()
+		if ret := execDirectVia(SQLHSTMT(0), q, execModeDirectA); ret != SQL_SUCCESS {
+			t.Fatalf("got ret %d, want SQL_SUCCESS", ret)
+		}
+		// directA and direct both go through sqlExecDirect.
+		if rec.direct != 1 || rec.directW != 0 || rec.prepare != 0 || rec.execute != 0 {
+			t.Errorf("call counts wrong: %+v", rec)
+		}
+	})
+
+	t.Run("directW", func(t *testing.T) {
+		rec := reset()
+		if ret := execDirectVia(SQLHSTMT(0), q, execModeDirectW); ret != SQL_SUCCESS {
+			t.Fatalf("got ret %d, want SQL_SUCCESS", ret)
+		}
+		if rec.direct != 0 || rec.directW != 1 || rec.prepare != 0 || rec.execute != 0 {
+			t.Errorf("call counts wrong: %+v", rec)
+		}
+		if rec.lastWQuery != q {
+			t.Errorf("got UTF-16 query %q, want %q", rec.lastWQuery, q)
+		}
+		// textLen is the UTF-16 code-unit count for ASCII = len(q).
+		if int(rec.lastWTextLen) != len(q) {
+			t.Errorf("got UTF-16 textLen %d, want %d", rec.lastWTextLen, len(q))
+		}
+	})
+
+	t.Run("prepexec", func(t *testing.T) {
+		rec := reset()
+		if ret := execDirectVia(SQLHSTMT(0), q, execModePrepExec); ret != SQL_SUCCESS {
+			t.Fatalf("got ret %d, want SQL_SUCCESS", ret)
+		}
+		if rec.direct != 0 || rec.directW != 0 || rec.prepare != 1 || rec.execute != 1 {
+			t.Errorf("call counts wrong: %+v", rec)
+		}
+		if rec.lastQuery != q {
+			t.Errorf("got prepared query %q, want %q", rec.lastQuery, q)
+		}
+	})
+
+	t.Run("prepexec short-circuits on SQLPrepare failure", func(t *testing.T) {
+		rec := reset()
+		// Override sqlPrepare to return an error.
+		sqlPrepare = func(stmt SQLHSTMT, text *byte, textLen SQLINTEGER) SQLRETURN {
+			rec.prepare++
+			return SQL_ERROR
+		}
+		if ret := execDirectVia(SQLHSTMT(0), q, execModePrepExec); ret != SQL_ERROR {
+			t.Fatalf("got ret %d, want SQL_ERROR", ret)
+		}
+		if rec.prepare != 1 || rec.execute != 0 {
+			t.Errorf("expected SQLExecute to be skipped on prepare failure: %+v", rec)
+		}
+	})
 }
 
 // TestCStmtText verifies the statement buffer passed to

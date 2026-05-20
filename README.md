@@ -330,6 +330,28 @@ export GODBC_LIBRARY_PATH=/opt/homebrew/lib/libodbc.2.dylib
 export GODBC_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/libodbc.so.2
 ```
 
+### Statement Execution Mode
+
+By default the driver routes paramless queries through `SQLExecDirect`. If your
+ODBC driver has a bug in that entry point (see
+[issue #2](https://github.com/slingdata-io/godbc/issues/2)), set
+`GODBC_EXEC_MODE` to route around it without rebuilding:
+
+| Value | Entry point used |
+|-------|------------------|
+| unset / `direct` (default) | `SQLExecDirect` (ANSI on Unix, `SQLExecDirectA` on Windows) |
+| `directA` | `SQLExecDirect` / `SQLExecDirectA` explicitly (same as default) |
+| `directW` | `SQLExecDirectW` (UTF-16 wide-char variant) |
+| `prepexec` | `SQLPrepare` + `SQLExecute` (two-step path) |
+
+```bash
+GODBC_EXEC_MODE=prepexec ./your-app
+GODBC_EXEC_MODE=directW  ./your-app
+```
+
+This only affects paramless `db.Exec`/`db.Query`/`db.Ping`; parameterized
+queries already go through the prepare/execute path.
+
 ### Debug FFI Tracing
 
 Set `GODBC_DEBUG=1` to trace every ODBC FFI call. Each native call is logged
