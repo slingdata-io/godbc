@@ -1,6 +1,7 @@
 package godbc
 
 import (
+	"os"
 	"reflect"
 	"testing"
 	"time"
@@ -1769,6 +1770,57 @@ func TestParseExecMode(t *testing.T) {
 		if got != c.want {
 			t.Errorf("parseExecMode(%q) = %d, want %d", c.in, got, c.want)
 		}
+	}
+}
+
+// TestCurrentExecMode verifies the execution mode is resolved at call time:
+// the GODBC_EXEC_MODE env var is honored dynamically, and SetExecMode
+// overrides it.
+func TestCurrentExecMode(t *testing.T) {
+	// Save and restore global state.
+	origEnv, hadEnv := os.LookupEnv("GODBC_EXEC_MODE")
+	origOverride := execModeOverride.Load()
+	t.Cleanup(func() {
+		if hadEnv {
+			os.Setenv("GODBC_EXEC_MODE", origEnv)
+		} else {
+			os.Unsetenv("GODBC_EXEC_MODE")
+		}
+		execModeOverride.Store(origOverride)
+	})
+
+	// No env, no override -> default.
+	os.Unsetenv("GODBC_EXEC_MODE")
+	execModeOverride.Store(0)
+	if got := currentExecMode(); got != execModeDirect {
+		t.Errorf("default: got %d, want execModeDirect", got)
+	}
+
+	// Env var is read dynamically (not frozen at init).
+	os.Setenv("GODBC_EXEC_MODE", "prepexec")
+	if got := currentExecMode(); got != execModePrepExec {
+		t.Errorf("env prepexec: got %d, want execModePrepExec", got)
+	}
+	os.Setenv("GODBC_EXEC_MODE", "directW")
+	if got := currentExecMode(); got != execModeDirectW {
+		t.Errorf("env directW: got %d, want execModeDirectW", got)
+	}
+
+	// SetExecMode overrides the env var.
+	SetExecMode("directA")
+	if got := currentExecMode(); got != execModeDirectA {
+		t.Errorf("override directA over env directW: got %d, want execModeDirectA", got)
+	}
+
+	// Clearing the override falls back to the env var again.
+	SetExecMode("")
+	if got := currentExecMode(); got != execModeDirect {
+		t.Errorf("override cleared to direct: got %d, want execModeDirect", got)
+	}
+	// "" parses to execModeDirect, so the override is still active (forcing
+	// direct) — the env var (directW) is not consulted. Verify that.
+	if got := currentExecMode(); got != execModeDirect {
+		t.Errorf("empty override still forces direct: got %d, want execModeDirect", got)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
@@ -269,10 +270,8 @@ const (
 	execModePrepExec                 // SQLPrepare + SQLExecute
 )
 
-var currentExecMode = parseExecMode(os.Getenv("GODBC_EXEC_MODE"))
-
-// parseExecMode maps the GODBC_EXEC_MODE env var to an execMode. Unknown or
-// empty values fall back to execModeDirect.
+// parseExecMode maps a GODBC_EXEC_MODE value to an execMode. Unknown or empty
+// values fall back to execModeDirect.
 func parseExecMode(s string) execMode {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "directa", "direct_a", "a":
@@ -286,15 +285,42 @@ func parseExecMode(s string) execMode {
 	}
 }
 
+// currentExecMode resolves the active execution mode.
+//
+// The GODBC_EXEC_MODE environment variable is read on every call rather than
+// once at init, so a program can set it in code (os.Setenv) before its first
+// query and have it take effect. An explicit override set via SetExecMode
+// takes precedence over the environment variable.
+func currentExecMode() execMode {
+	if m := execModeOverride.Load(); m != 0 {
+		return execMode(m - 1) // stored as mode+1 so 0 means "unset"
+	}
+	return parseExecMode(os.Getenv("GODBC_EXEC_MODE"))
+}
+
+// execModeOverride holds an in-code override of the execution mode. It stores
+// mode+1 so that the zero value means "no override, use GODBC_EXEC_MODE".
+var execModeOverride atomic.Int32
+
+// SetExecMode overrides the statement execution mode in code, taking precedence
+// over the GODBC_EXEC_MODE environment variable. Valid values are the same as
+// the env var: "", "direct", "directA", "directW", "prepexec". It is safe to
+// call concurrently and affects subsequent ExecDirect calls.
+func SetExecMode(mode string) {
+	execModeOverride.Store(int32(parseExecMode(mode)) + 1)
+}
+
 // ExecDirect executes an SQL statement directly.
 //
 // The statement text length is passed explicitly rather than SQL_NTS, and the
 // underlying buffer is NUL-terminated to be robust against Linux drivers that
 // strlen the text regardless. See cStmtText.
 //
-// The ODBC entry point used is selected by GODBC_EXEC_MODE (see execMode).
+// The ODBC entry point used is selected by GODBC_EXEC_MODE (or SetExecMode);
+// see execMode. The mode is resolved here, on every call, so it can be changed
+// at runtime.
 func ExecDirect(stmt SQLHSTMT, query string) SQLRETURN {
-	return execDirectVia(stmt, query, currentExecMode)
+	return execDirectVia(stmt, query, currentExecMode())
 }
 
 // execDirectVia is the testable core of ExecDirect — it dispatches to the

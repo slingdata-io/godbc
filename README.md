@@ -349,6 +349,13 @@ GODBC_EXEC_MODE=prepexec ./your-app
 GODBC_EXEC_MODE=directW  ./your-app
 ```
 
+The env var is read on every call, so you can also set it from code before
+your first query, or override it explicitly with `godbc.SetExecMode`:
+
+```go
+godbc.SetExecMode("prepexec") // takes precedence over GODBC_EXEC_MODE
+```
+
 This only affects paramless `db.Exec`/`db.Query`/`db.Ping`; parameterized
 queries already go through the prepare/execute path.
 
