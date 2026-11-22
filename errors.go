@@ -116,6 +116,22 @@ func NewError(handleType SQLSMALLINT, handle SQLHANDLE) error {
 	return errors
 }
 
+// hasSQLState reports whether err is an Error, or an Errors with a record,
+// that has the given SQLSTATE.
+func hasSQLState(err error, state string) bool {
+	switch e := err.(type) {
+	case *Error:
+		return e != nil && e.SQLState == state
+	case Errors:
+		for _, rec := range e {
+			if rec.SQLState == state {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // SQLState constants for common errors.
 // These follow the ODBC specification and can be used with errors.Is.
 const (

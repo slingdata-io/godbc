@@ -228,7 +228,7 @@ func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driv
 
 	// Execute the statement
 	ret := Execute(s.stmt)
-	if !IsSuccess(ret) {
+	if !IsSuccess(ret) && ret != SQL_NO_DATA {
 		// Check if cancelled by context
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -237,7 +237,11 @@ func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driv
 	}
 
 	// Create rows - don't close stmt when rows close (we own it)
-	return newRows(s, false)
+	rows, err := newRows(s, false)
+	if err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // bindParams binds parameters to the statement

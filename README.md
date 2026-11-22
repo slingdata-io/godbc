@@ -259,6 +259,33 @@ if odbcResult, ok := result.(*godbc.Result); ok {
 }
 ```
 
+## Multiple Result Sets
+
+A batch can return more than one result. For example, `INSERT ...; SELECT ...` gives a count result and then a row set.
+
+- A query skips each result that has no columns. The first result with columns is the first set.
+- A query with no result that has columns returns empty rows, with no error.
+- After the last row of a set, `Columns()` gives the columns of the next set. Call `rows.NextResultSet()` to read it.
+- The error of a later statement in the batch comes out of `rows.Err()`.
+
+```go
+rows, err := db.Query("INSERT INTO t VALUES (1); SELECT COUNT(*) AS n FROM t")
+if err != nil {
+    log.Fatal(err)
+}
+defer rows.Close()
+
+for rows.Next() {
+    var n int64
+    if err := rows.Scan(&n); err != nil {
+        log.Fatal(err)
+    }
+}
+if err := rows.Err(); err != nil {
+    log.Fatal(err) // includes errors of later statements
+}
+```
+
 ## Unit Tests
 
 Run the unit tests (no database connection required):

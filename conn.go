@@ -346,7 +346,7 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 		}
 
 		ret = ExecDirect(stmtHandle, query)
-		if !IsSuccess(ret) {
+		if !IsSuccess(ret) && ret != SQL_NO_DATA {
 			// Check if cancelled by context
 			if ctx.Err() != nil {
 				FreeHandle(SQL_HANDLE_STMT, SQLHANDLE(stmtHandle))
@@ -363,7 +363,12 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 			stmt:  stmtHandle,
 			query: query,
 		}
-		return newRows(stmt, true) // closeStmt=true since we own the handle
+		rows, err := newRows(stmt, true) // closeStmt=true since we own the handle
+		if err != nil {
+			stmt.Close()
+			return nil, err
+		}
+		return rows, nil
 	}
 
 	// Use prepared statement for parameterized queries

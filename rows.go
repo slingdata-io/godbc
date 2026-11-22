@@ -30,25 +30,25 @@ type Rows struct {
 	nativeTypes []string // native database type names (e.g., "VARCHAR", "DATETIME2", "BIGINT")
 	closed      bool
 	closeStmt   bool // Whether to close the statement when rows are closed
+
+	noMoreResults bool  // SQLMoreResults gave SQL_NO_DATA or IM001
+	peeked        bool  // advance already ran for the next result set
+	peekErr       error // result of that advance: nil, io.EOF or an error
 }
 
-// newRows creates a new Rows from a statement
+// newRows creates a new Rows from a statement.
+// It skips results that have no columns.
 func newRows(stmt *Stmt, closeStmt bool) (*Rows, error) {
-	var numCols SQLSMALLINT
-	ret := NumResultCols(stmt.stmt, &numCols)
-	if !IsSuccess(ret) {
-		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(stmt.stmt))
+	r := &Rows{stmt: stmt, closeStmt: closeStmt}
+	if err := r.seekColumns(); err != nil {
+		FreeStmt(stmt.stmt, SQL_CLOSE)
+		return nil, err
 	}
+	return r, nil
+}
 
-	if numCols == 0 {
-		// No result set (e.g., UPDATE/INSERT)
-		return &Rows{
-			stmt:      stmt,
-			columns:   nil,
-			closeStmt: closeStmt,
-		}, nil
-	}
-
+// describeColumns reads the metadata of the numCols columns of the current result.
+func (r *Rows) describeColumns(numCols SQLSMALLINT) error {
 	columns := make([]string, numCols)
 	colTypes := make([]SQLSMALLINT, numCols)
 	colSizes := make([]SQLULEN, numCols)
@@ -59,9 +59,9 @@ func newRows(stmt *Stmt, closeStmt bool) (*Rows, error) {
 	colName := make([]byte, 256)
 	typeName := make([]byte, 256)
 	for i := SQLUSMALLINT(1); i <= SQLUSMALLINT(numCols); i++ {
-		nameLen, dataType, colSize, decDigitsVal, nullableVal, ret := DescribeCol(stmt.stmt, i, colName)
+		nameLen, dataType, colSize, decDigitsVal, nullableVal, ret := DescribeCol(r.stmt.stmt, i, colName)
 		if !IsSuccess(ret) {
-			return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(stmt.stmt))
+			return NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 		}
 
 		columns[i-1] = string(colName[:nameLen])
@@ -71,22 +71,104 @@ func newRows(stmt *Stmt, closeStmt bool) (*Rows, error) {
 		nullable[i-1] = nullableVal
 
 		// Get native type name using SQLColAttribute with SQL_DESC_TYPE_NAME
-		strLen, _, attrRet := ColAttribute(stmt.stmt, i, SQL_DESC_TYPE_NAME, typeName)
+		strLen, _, attrRet := ColAttribute(r.stmt.stmt, i, SQL_DESC_TYPE_NAME, typeName)
 		if IsSuccess(attrRet) && strLen > 0 {
 			nativeTypes[i-1] = string(typeName[:strLen])
 		}
 	}
 
-	return &Rows{
-		stmt:        stmt,
-		columns:     columns,
-		colTypes:    colTypes,
-		colSizes:    colSizes,
-		decDigits:   decDigits,
-		nullable:    nullable,
-		nativeTypes: nativeTypes,
-		closeStmt:   closeStmt,
-	}, nil
+	r.columns = columns
+	r.colTypes = colTypes
+	r.colSizes = colSizes
+	r.decDigits = decDigits
+	r.nullable = nullable
+	r.nativeTypes = nativeTypes
+	return nil
+}
+
+// clearColumns drops the metadata of the current result.
+func (r *Rows) clearColumns() {
+	r.columns = nil
+	r.colTypes = nil
+	r.colSizes = nil
+	r.decDigits = nil
+	r.nullable = nil
+	r.nativeTypes = nil
+}
+
+// moreResults calls SQLMoreResults one time.
+// It returns false at the end of the results: SQL_NO_DATA, or SQLSTATE IM001
+// from a driver that does not support more results.
+func (r *Rows) moreResults() (bool, error) {
+	ret := MoreResults(r.stmt.stmt)
+	if IsSuccess(ret) {
+		return true, nil
+	}
+	if ret != SQL_NO_DATA {
+		err := NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
+		if !hasSQLState(err, "IM001") {
+			return false, err
+		}
+	}
+	r.noMoreResults = true
+	return false, nil
+}
+
+// seekColumns reads the columns of the current result.
+// While the current result has no columns, it moves to the next result.
+// At the end of the results, it leaves the columns empty.
+func (r *Rows) seekColumns() error {
+	for {
+		var numCols SQLSMALLINT
+		if ret := NumResultCols(r.stmt.stmt, &numCols); !IsSuccess(ret) {
+			return NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
+		}
+		if numCols > 0 {
+			return r.describeColumns(numCols)
+		}
+		more, err := r.moreResults()
+		if err != nil {
+			return err
+		}
+		if !more {
+			r.clearColumns()
+			return nil
+		}
+	}
+}
+
+// advance moves to the next result that has columns.
+// It returns io.EOF when there is none.
+func (r *Rows) advance() error {
+	r.clearColumns()
+	more, err := r.moreResults()
+	if err != nil {
+		return err
+	}
+	if !more {
+		return io.EOF
+	}
+	if err := r.seekColumns(); err != nil {
+		return err
+	}
+	if len(r.columns) == 0 {
+		return io.EOF
+	}
+	return nil
+}
+
+// peek runs advance one time and stores the outcome.
+func (r *Rows) peek() {
+	r.peekErr = r.advance()
+	r.peeked = true
+}
+
+// endErr gives the error that ends the current result set.
+func (r *Rows) endErr() error {
+	if r.peekErr != nil {
+		return r.peekErr
+	}
+	return io.EOF
 }
 
 // Columns returns the names of all columns in the result set.
@@ -120,9 +202,18 @@ func (r *Rows) Next(dest []driver.Value) error {
 		return io.EOF
 	}
 
+	if r.peeked {
+		return r.endErr()
+	}
+	if len(r.columns) == 0 {
+		return io.EOF
+	}
+
 	ret := Fetch(r.stmt.stmt)
 	if ret == SQL_NO_DATA {
-		return io.EOF
+		// Read ahead so that the error of a later statement comes out of Next.
+		r.peek()
+		return r.endErr()
 	}
 	if !IsSuccess(ret) {
 		return NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
@@ -800,63 +891,35 @@ func (r *Rows) ColumnTypePrecisionScale(index int) (precision, scale int64, ok b
 // HasNextResultSet reports whether there are additional result sets available.
 // Use NextResultSet to advance to the next result set.
 func (r *Rows) HasNextResultSet() bool {
-	return MoreResults(r.stmt.stmt) == SQL_SUCCESS
+	if r.closed {
+		return false
+	}
+	if !r.peeked {
+		if r.noMoreResults {
+			return false
+		}
+		r.peek()
+	}
+	return r.peekErr == nil
 }
 
 // NextResultSet advances to the next result set from a multi-result query.
+// It skips results that have no columns.
 // Returns io.EOF if there are no more result sets.
 func (r *Rows) NextResultSet() error {
-	ret := MoreResults(r.stmt.stmt)
-	if ret == SQL_NO_DATA {
+	if r.closed {
 		return io.EOF
 	}
-	if !IsSuccess(ret) {
-		return NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
+	if r.peeked {
+		err := r.peekErr
+		r.peeked = false
+		r.peekErr = nil
+		return err
 	}
-
-	// Re-fetch column info for new result set
-	var numCols SQLSMALLINT
-	ret = NumResultCols(r.stmt.stmt, &numCols)
-	if !IsSuccess(ret) {
-		return NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
+	if r.noMoreResults {
+		return io.EOF
 	}
-
-	columns := make([]string, numCols)
-	colTypes := make([]SQLSMALLINT, numCols)
-	colSizes := make([]SQLULEN, numCols)
-	decDigits := make([]SQLSMALLINT, numCols)
-	nullable := make([]SQLSMALLINT, numCols)
-	nativeTypes := make([]string, numCols)
-
-	colName := make([]byte, 256)
-	typeName := make([]byte, 256)
-	for i := SQLUSMALLINT(1); i <= SQLUSMALLINT(numCols); i++ {
-		nameLen, dataType, colSize, decDigitsVal, nullableVal, ret := DescribeCol(r.stmt.stmt, i, colName)
-		if !IsSuccess(ret) {
-			return NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
-		}
-
-		columns[i-1] = string(colName[:nameLen])
-		colTypes[i-1] = dataType
-		colSizes[i-1] = colSize
-		decDigits[i-1] = decDigitsVal
-		nullable[i-1] = nullableVal
-
-		// Get native type name using SQLColAttribute with SQL_DESC_TYPE_NAME
-		strLen, _, attrRet := ColAttribute(r.stmt.stmt, i, SQL_DESC_TYPE_NAME, typeName)
-		if IsSuccess(attrRet) && strLen > 0 {
-			nativeTypes[i-1] = string(typeName[:strLen])
-		}
-	}
-
-	r.columns = columns
-	r.colTypes = colTypes
-	r.colSizes = colSizes
-	r.decDigits = decDigits
-	r.nullable = nullable
-	r.nativeTypes = nativeTypes
-
-	return nil
+	return r.advance()
 }
 
 // =============================================================================
@@ -877,7 +940,7 @@ type ScrollableRows interface {
 
 // First moves the cursor to the first row
 func (r *Rows) First() error {
-	if r.closed {
+	if r.closed || len(r.columns) == 0 {
 		return io.EOF
 	}
 	ret := FetchScroll(r.stmt.stmt, SQL_FETCH_FIRST, 0)
@@ -892,7 +955,7 @@ func (r *Rows) First() error {
 
 // Last moves the cursor to the last row
 func (r *Rows) Last() error {
-	if r.closed {
+	if r.closed || len(r.columns) == 0 {
 		return io.EOF
 	}
 	ret := FetchScroll(r.stmt.stmt, SQL_FETCH_LAST, 0)
@@ -907,7 +970,7 @@ func (r *Rows) Last() error {
 
 // Prior moves the cursor to the previous row
 func (r *Rows) Prior() error {
-	if r.closed {
+	if r.closed || len(r.columns) == 0 {
 		return io.EOF
 	}
 	ret := FetchScroll(r.stmt.stmt, SQL_FETCH_PRIOR, 0)
@@ -923,7 +986,7 @@ func (r *Rows) Prior() error {
 // Absolute moves the cursor to the specified row number (1-based)
 // Positive values count from the beginning, negative values count from the end.
 func (r *Rows) Absolute(row int64) error {
-	if r.closed {
+	if r.closed || len(r.columns) == 0 {
 		return io.EOF
 	}
 	ret := FetchScroll(r.stmt.stmt, SQL_FETCH_ABSOLUTE, SQLLEN(row))
@@ -938,7 +1001,7 @@ func (r *Rows) Absolute(row int64) error {
 
 // Relative moves the cursor by the specified offset from the current position
 func (r *Rows) Relative(offset int64) error {
-	if r.closed {
+	if r.closed || len(r.columns) == 0 {
 		return io.EOF
 	}
 	ret := FetchScroll(r.stmt.stmt, SQL_FETCH_RELATIVE, SQLLEN(offset))
