@@ -1,6 +1,7 @@
 package godbc
 
 import (
+	"bytes"
 	"context"
 	"database/sql/driver"
 	"errors"
@@ -27,6 +28,41 @@ var lastInsertIdQueries = map[string]string{
 	// Oracle uses RETURNING clause or sequences
 }
 
+// wcharMode selects how the driver reads and writes wide text.
+// Only wcharModeChar changes behavior. Other values use UTF-16.
+type wcharMode int
+
+const (
+	wcharModeAuto  wcharMode = iota // choose from the driver name
+	wcharModeUTF16                  // SQL_C_WCHAR (UTF-16)
+	wcharModeChar                   // SQL_C_CHAR (UTF-8)
+)
+
+// parseWCharMode maps a GODBC_WCHAR_MODE value to a wcharMode.
+// An unknown value gives wcharModeAuto.
+func parseWCharMode(s string) wcharMode {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "utf16", "wide":
+		return wcharModeUTF16
+	case "char", "utf8":
+		return wcharModeChar
+	default:
+		return wcharModeAuto
+	}
+}
+
+// resolveWCharMode turns an auto setting into utf16 or char.
+// On non-Windows systems, the OdbcFb driver gets char.
+func resolveWCharMode(setting wcharMode, goos, driverName string) wcharMode {
+	if setting != wcharModeAuto {
+		return setting
+	}
+	if goos != "windows" && strings.Contains(strings.ToLower(driverName), "odbcfb") {
+		return wcharModeChar
+	}
+	return wcharModeUTF16
+}
+
 // Conn implements driver.Conn and represents a connection to a database
 type Conn struct {
 	env    SQLHENV
@@ -41,6 +77,9 @@ type Conn struct {
 
 	// Query execution options
 	queryTimeout time.Duration
+
+	// Wide text handling
+	wcharMode wcharMode
 }
 
 // Prepare prepares a statement for execution
@@ -471,23 +510,28 @@ func (c *Conn) getLastInsertId() int64 {
 	return value
 }
 
+// getInfoString returns a string value of SQLGetInfo.
+// It returns "" when the call fails.
+func (c *Conn) getInfoString(infoType SQLUSMALLINT) string {
+	buf := make([]byte, 256)
+	strLen, ret := GetInfo(c.dbc, infoType, buf)
+	if !IsSuccess(ret) || strLen <= 0 {
+		return ""
+	}
+	end := int(strLen)
+	if end > len(buf) {
+		end = len(buf)
+	}
+	if n := bytes.IndexByte(buf[:end], 0); n >= 0 {
+		end = n
+	}
+	return string(buf[:end])
+}
+
 // detectDatabaseType queries the ODBC driver for the database type
 func (c *Conn) detectDatabaseType() {
-	buf := make([]byte, 256)
-	strLen, ret := GetInfo(c.dbc, SQL_DBMS_NAME, buf)
-	if IsSuccess(ret) && strLen > 0 {
-		// Find the null terminator
-		end := int(strLen)
-		if end > len(buf) {
-			end = len(buf)
-		}
-		for i := 0; i < end; i++ {
-			if buf[i] == 0 {
-				end = i
-				break
-			}
-		}
-		c.dbType = string(buf[:end])
+	if name := c.getInfoString(SQL_DBMS_NAME); name != "" {
+		c.dbType = name
 	}
 }
 

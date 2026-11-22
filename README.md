@@ -390,6 +390,31 @@ godbc.SetExecMode("prepexec") // takes precedence over GODBC_EXEC_MODE
 This only affects paramless `db.Exec`/`db.Query`/`db.Ping`; parameterized
 queries already go through the prepare/execute path.
 
+### Wide Character Mode
+
+By default the driver reads wide text columns (`NCHAR`, `NVARCHAR`) and binds
+string parameters as UTF-16 (`SQL_C_WCHAR`). Some ODBC drivers, such as the
+Firebird driver (OdbcFb) on Linux and macOS, write wrong data with
+`SQL_C_WCHAR`. For these drivers, the driver can use UTF-8 text
+(`SQL_C_CHAR`) in both directions. Set `GODBC_WCHAR_MODE`:
+
+| Value | Behavior |
+|-------|----------|
+| unset / `auto` (default) | `char` on non-Windows when `SQL_DRIVER_NAME` contains `odbcfb` (case ignored). `utf16` in all other cases. |
+| `utf16` / `wide` | UTF-16 (`SQL_C_WCHAR`). |
+| `char` / `utf8` | UTF-8 (`SQL_C_CHAR`). |
+
+Values are not case sensitive. An unknown value is the same as `auto`.
+On Windows, `auto` always gives `utf16`.
+
+```bash
+GODBC_WCHAR_MODE=char ./your-app
+```
+
+The driver reads the setting one time for each connection, when it opens the
+connection. In `auto` mode on non-Windows systems, this adds one `SQLGetInfo`
+call. The `char` mode expects UTF-8 data from the database.
+
 ### Debug FFI Tracing
 
 Set `GODBC_DEBUG=1` to trace every ODBC FFI call. Each native call is logged

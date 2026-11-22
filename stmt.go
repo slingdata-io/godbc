@@ -379,7 +379,7 @@ func (s *Stmt) bindParam(paramNum SQLUSMALLINT, value interface{}) error {
 	if direction == ParamOutput || direction == ParamInputOutput {
 		buf, cType, sqlType, colSize, decDigits, length, err = s.allocateOutputBuffer(actualValue, outputSize, direction)
 	} else {
-		buf, cType, sqlType, colSize, decDigits, length, err = convertToODBC(actualValue)
+		buf, cType, sqlType, colSize, decDigits, length, err = convertToODBCWithMode(actualValue, s.conn.wcharMode)
 	}
 	if err != nil {
 		return err
@@ -757,7 +757,7 @@ func (s *Stmt) execBatchArrayBinding(ctx context.Context, paramSets [][]driver.N
 		}
 
 		// Allocate the column buffer
-		colBuf, err := AllocateColumnArray(values, numRows)
+		colBuf, err := allocateColumnArray(values, numRows, s.conn.wcharMode)
 		if err != nil || colBuf == nil {
 			// Reset and fall back
 			SetStmtAttr(s.stmt, SQL_ATTR_PARAMSET_SIZE, 1, 0)

@@ -106,6 +106,25 @@ func ParseGUID(s string) (GUID, error) {
 	return g, nil
 }
 
+// convertToODBCWithMode is like convertToODBC. In char mode, it binds
+// strings as NUL-terminated UTF-8 SQL_C_CHAR.
+func convertToODBCWithMode(value interface{}, mode wcharMode) (interface{}, SQLSMALLINT, SQLSMALLINT, SQLULEN, SQLSMALLINT, SQLLEN, error) {
+	if mode == wcharModeChar {
+		var s string
+		switch v := value.(type) {
+		case string:
+			s = v
+		case WideString:
+			s = string(v)
+		default:
+			return convertToODBC(value)
+		}
+		buf := append([]byte(s), 0)
+		return buf, SQL_C_CHAR, SQL_VARCHAR, SQLULEN(max(len(s), 1)), 0, SQLLEN(len(s)), nil
+	}
+	return convertToODBC(value)
+}
+
 // convertToODBC converts a Go value to ODBC binding parameters
 // Returns: buffer, C type, SQL type, column size, decimal digits, length indicator, error
 func convertToODBC(value interface{}) (interface{}, SQLSMALLINT, SQLSMALLINT, SQLULEN, SQLSMALLINT, SQLLEN, error) {
@@ -381,6 +400,11 @@ type ColumnBuffer struct {
 // AllocateColumnArray allocates a column buffer for array parameter binding
 // based on the type of the first non-nil value in the column
 func AllocateColumnArray(values []interface{}, numRows int) (*ColumnBuffer, error) {
+	return allocateColumnArray(values, numRows, wcharModeUTF16)
+}
+
+// allocateColumnArray is AllocateColumnArray with a wide text mode.
+func allocateColumnArray(values []interface{}, numRows int, mode wcharMode) (*ColumnBuffer, error) {
 	if numRows == 0 {
 		return nil, nil
 	}
@@ -512,6 +536,34 @@ func AllocateColumnArray(values []interface{}, numRows int) (*ColumnBuffer, erro
 		buf.ElemSize = 4
 
 	case string:
+		if mode == wcharModeChar {
+			maxLen := 0
+			for _, v := range values {
+				if s, ok := v.(string); ok && len(s) > maxLen {
+					maxLen = len(s)
+				}
+			}
+			if maxLen == 0 {
+				maxLen = 255
+			}
+			elemSize := maxLen + 1 // +1 for null terminator
+			data := make([]byte, numRows*elemSize)
+			for i, v := range values {
+				if v == nil {
+					buf.Lengths[i] = SQL_NULL_DATA
+				} else if s, ok := v.(string); ok {
+					copy(data[i*elemSize:], s)
+					buf.Lengths[i] = SQLLEN(len(s))
+				}
+			}
+			buf.Data = data
+			buf.CType = SQL_C_CHAR
+			buf.SQLType = SQL_VARCHAR
+			buf.ColSize = SQLULEN(maxLen)
+			buf.ElemSize = elemSize
+			break
+		}
+
 		// Find max character count needed (for UTF-16)
 		maxCharCount := 0
 		for _, v := range values {

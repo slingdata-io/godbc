@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
+	"os"
+	"runtime"
 	"time"
 )
 
@@ -96,6 +98,14 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 		lastInsertIdBehavior: c.LastInsertIdBehavior,
 		queryTimeout:         c.QueryTimeout,
 	}
+
+	// Choose the wide text mode one time for this connection
+	setting := parseWCharMode(os.Getenv("GODBC_WCHAR_MODE"))
+	driverName := ""
+	if setting == wcharModeAuto && runtime.GOOS != "windows" {
+		driverName = conn.getInfoString(SQL_DRIVER_NAME)
+	}
+	conn.wcharMode = resolveWCharMode(setting, runtime.GOOS, driverName)
 
 	// Detect database type for LastInsertId support
 	if conn.lastInsertIdBehavior == LastInsertIdAuto {

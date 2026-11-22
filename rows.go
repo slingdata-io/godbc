@@ -262,6 +262,9 @@ func (r *Rows) getColumnData(colNum SQLUSMALLINT) (interface{}, error) {
 	case SQL_CHAR, SQL_VARCHAR, SQL_LONGVARCHAR:
 		return r.getString(colNum, colSize)
 	case SQL_WCHAR, SQL_WVARCHAR, SQL_WLONGVARCHAR:
+		if r.stmt.conn.wcharMode == wcharModeChar {
+			return r.getString(colNum, colSize*4)
+		}
 		return r.getWideString(colNum, colSize)
 	case SQL_BINARY, SQL_VARBINARY, SQL_LONGVARBINARY:
 		return r.getBytes(colNum, colSize)
