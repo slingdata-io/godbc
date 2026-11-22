@@ -32,8 +32,13 @@ type NamedParams struct {
 //   - @name  (SQL Server style)
 //   - $name  (PostgreSQL style - not $1 which is positional)
 //
-// Returns nil if no named parameters are found (query uses positional ? only).
-// The original query is preserved if it contains only ? placeholders.
+// A prefix starts a parameter only when an identifier start follows it and the
+// byte before it is not an identifier byte (A-Z a-z 0-9 _ $ or >= 0x80), ':' or '@'.
+// So V$SESSION, x::int and @@ROWCOUNT are not parameters.
+// The parser skips string literals, quoted and backtick identifiers, and comments.
+//
+// Returns nil if no named parameters are found.
+// Returns nil if the query has a positional ? outside literals and comments.
 func ParseNamedParams(query string) *NamedParams {
 	if len(query) == 0 {
 		return nil
@@ -42,13 +47,9 @@ func ParseNamedParams(query string) *NamedParams {
 	// Quick scan to see if we have any named parameters
 	hasNamed := false
 	for i := 0; i < len(query); i++ {
-		c := query[i]
-		if c == ':' || c == '@' || c == '$' {
-			// Check if followed by a valid identifier start
-			if i+1 < len(query) && isIdentStart(query[i+1]) {
-				hasNamed = true
-				break
-			}
+		if isNamedParamStart(query, i) {
+			hasNamed = true
+			break
 		}
 	}
 
@@ -107,6 +108,26 @@ func ParseNamedParams(query string) *NamedParams {
 			continue
 		}
 
+		// Skip backtick identifiers
+		if c == '`' {
+			start := i
+			i++
+			for i < len(query) {
+				if query[i] == '`' {
+					if i+1 < len(query) && query[i+1] == '`' {
+						// Escaped backtick
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+			output = append(output, query[start:i]...)
+			continue
+		}
+
 		// Skip comments (-- style)
 		if c == '-' && i+1 < len(query) && query[i+1] == '-' {
 			start := i
@@ -132,8 +153,13 @@ func ParseNamedParams(query string) *NamedParams {
 			continue
 		}
 
+		// Positional parameters win over named parameters
+		if c == '?' {
+			return nil
+		}
+
 		// Check for named parameter
-		if (c == ':' || c == '@' || c == '$') && i+1 < len(query) && isIdentStart(query[i+1]) {
+		if isNamedParamStart(query, i) {
 			// Extract the parameter name
 			start := i + 1
 			end := start
@@ -176,6 +202,24 @@ func ParseNamedParams(query string) *NamedParams {
 
 	result.Query = string(output)
 	return result
+}
+
+// isNamedParamStart returns true if query[i] starts a named parameter.
+func isNamedParamStart(query string, i int) bool {
+	c := query[i]
+	if c != ':' && c != '@' && c != '$' {
+		return false
+	}
+	if i+1 >= len(query) || !isIdentStart(query[i+1]) {
+		return false
+	}
+	if i > 0 {
+		p := query[i-1]
+		if isIdentChar(p) || p == '$' || p >= 0x80 || p == ':' || p == '@' {
+			return false
+		}
+	}
+	return true
 }
 
 // isIdentStart returns true if c is a valid identifier start character

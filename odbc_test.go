@@ -1,6 +1,7 @@
 package godbc
 
 import (
+	"context"
 	"os"
 	"reflect"
 	"testing"
@@ -1545,6 +1546,126 @@ func TestParseNamedParams_Underscore(t *testing.T) {
 	}
 	if len(result.Names) != 2 {
 		t.Errorf("expected 2 names, got %d: %v", len(result.Names), result.Names)
+	}
+}
+
+func TestParseNamedParams_DollarInIdentifier(t *testing.T) {
+	repro := "select cast(cast(? as varchar(20) character set utf8) as varchar(20) character set octets) from rdb$database"
+	if result := ParseNamedParams(repro); result != nil {
+		t.Errorf("expected nil, got %+v", result)
+	}
+
+	result := ParseNamedParams("select sid from V$SESSION where sid = :sid")
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if want := "select sid from V$SESSION where sid = ?"; result.Query != want {
+		t.Errorf("got query %q, want %q", result.Query, want)
+	}
+	if !reflect.DeepEqual(result.Names, []string{"sid"}) {
+		t.Errorf("unexpected names: %v", result.Names)
+	}
+}
+
+func TestParseNamedParams_DoubleColonCast(t *testing.T) {
+	result := ParseNamedParams("select x::int from t where id = :id")
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if want := "select x::int from t where id = ?"; result.Query != want {
+		t.Errorf("got query %q, want %q", result.Query, want)
+	}
+	if !reflect.DeepEqual(result.Names, []string{"id"}) {
+		t.Errorf("unexpected names: %v", result.Names)
+	}
+
+	if result := ParseNamedParams("select '1'::int"); result != nil {
+		t.Errorf("expected nil, got %+v", result)
+	}
+}
+
+func TestParseNamedParams_DoubleAt(t *testing.T) {
+	result := ParseNamedParams("insert into t values (@p1, @p2); select @@ROWCOUNT")
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if want := "insert into t values (?, ?); select @@ROWCOUNT"; result.Query != want {
+		t.Errorf("got query %q, want %q", result.Query, want)
+	}
+	if !reflect.DeepEqual(result.Names, []string{"p1", "p2"}) {
+		t.Errorf("unexpected names: %v", result.Names)
+	}
+}
+
+func TestParseNamedParams_NonASCIIBeforePrefix(t *testing.T) {
+	if result := ParseNamedParams("select foo\u00e9$bar from t"); result != nil {
+		t.Errorf("expected nil, got %+v", result)
+	}
+}
+
+func TestParseNamedParams_Backticks(t *testing.T) {
+	result := ParseNamedParams("select `a:b` from t where id = :id")
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if want := "select `a:b` from t where id = ?"; result.Query != want {
+		t.Errorf("got query %q, want %q", result.Query, want)
+	}
+	if !reflect.DeepEqual(result.Names, []string{"id"}) {
+		t.Errorf("unexpected names: %v", result.Names)
+	}
+}
+
+func TestParseNamedParams_PositionalWins(t *testing.T) {
+	if result := ParseNamedParams("declare @n int = ?; select @n"); result != nil {
+		t.Errorf("expected nil, got %+v", result)
+	}
+
+	result := ParseNamedParams("select '?' as q from t where id = :id")
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if !reflect.DeepEqual(result.Names, []string{"id"}) {
+		t.Errorf("unexpected names: %v", result.Names)
+	}
+}
+
+// TestConnPrepareContext_DollarIdentifier verifies that PrepareContext sends
+// a query with a $ identifier unchanged.
+func TestConnPrepareContext_DollarIdentifier(t *testing.T) {
+	origAlloc := sqlAllocHandle
+	origPrepare := sqlPrepare
+	origNumParams := sqlNumParams
+	t.Cleanup(func() {
+		sqlAllocHandle = origAlloc
+		sqlPrepare = origPrepare
+		sqlNumParams = origNumParams
+	})
+
+	var prepared string
+	sqlAllocHandle = func(handleType SQLSMALLINT, inputHandle SQLHANDLE, outputHandle *SQLHANDLE) SQLRETURN {
+		*outputHandle = 1
+		return SQL_SUCCESS
+	}
+	sqlPrepare = func(stmt SQLHSTMT, text *byte, textLen SQLINTEGER) SQLRETURN {
+		prepared = string(unsafe.Slice(text, int(textLen)))
+		return SQL_SUCCESS
+	}
+	sqlNumParams = func(stmt SQLHSTMT, count *SQLSMALLINT) SQLRETURN {
+		*count = 1
+		return SQL_SUCCESS
+	}
+
+	const q = "select cast(cast(? as varchar(20) character set utf8) as varchar(20) character set octets) from rdb$database"
+	st, err := (&Conn{dbc: 1}).PrepareContext(context.Background(), q)
+	if err != nil {
+		t.Fatalf("PrepareContext: %v", err)
+	}
+	if prepared != q {
+		t.Errorf("SQLPrepare got %q, want %q", prepared, q)
+	}
+	if got := st.(*Stmt).namedParams; got != nil {
+		t.Errorf("expected nil namedParams, got %+v", got)
 	}
 }
 

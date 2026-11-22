@@ -171,6 +171,10 @@ rows, err := db.Query(
 )
 ```
 
+A prefix is a parameter only when it does not follow an identifier character. So `V$SESSION` and `rdb$database` stay as they are. The pairs `::` (as in `x::int`) and `@@` (as in `@@ROWCOUNT`) are not parameters. Text in quotes, backtick identifiers and comments is not parsed.
+
+A query that has a `?` outside quotes and comments uses only positional parameters. The driver does not parse named parameters in it.
+
 Named parameters can appear multiple times in a query:
 
 ```go
