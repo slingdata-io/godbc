@@ -54,8 +54,8 @@ func (f *fakeODBC) current() *fakeResult {
 }
 
 // fakeBytes turns an ODBC buffer address into a slice.
-func fakeBytes(p uintptr, n int) []byte {
-	return unsafe.Slice((*byte)(*(*unsafe.Pointer)(unsafe.Pointer(&p))), n)
+func fakeBytes(p unsafe.Pointer, n int) []byte {
+	return unsafe.Slice((*byte)(p), n)
 }
 
 // installFakeODBC replaces the FFI functions with stubs that read f.
@@ -186,11 +186,11 @@ func installFakeODBC(t *testing.T, f *fakeODBC) {
 		*colSize = 20
 		return SQL_SUCCESS
 	}
-	sqlColAttribute = func(stmt SQLHSTMT, col SQLUSMALLINT, field SQLUSMALLINT, attr uintptr, bufLen SQLSMALLINT, strLen *SQLSMALLINT, num *SQLLEN) SQLRETURN {
+	sqlColAttribute = func(stmt SQLHSTMT, col SQLUSMALLINT, field SQLUSMALLINT, attr unsafe.Pointer, bufLen SQLSMALLINT, strLen *SQLSMALLINT, num *SQLLEN) SQLRETURN {
 		*strLen = 0
 		return SQL_SUCCESS
 	}
-	sqlGetData = func(stmt SQLHSTMT, col SQLUSMALLINT, ctype SQLSMALLINT, target uintptr, bufLen SQLLEN, ind *SQLLEN) SQLRETURN {
+	sqlGetData = func(stmt SQLHSTMT, col SQLUSMALLINT, ctype SQLSMALLINT, target unsafe.Pointer, bufLen SQLLEN, ind *SQLLEN) SQLRETURN {
 		f.count("GetData")
 		f.mu.Lock()
 		defer f.mu.Unlock()

@@ -2,8 +2,20 @@ package godbc
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
+	"runtime/debug"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -668,7 +680,7 @@ func TestIsSuccess(t *testing.T) {
 func TestGetBufferPtr_Bytes(t *testing.T) {
 	buf := []byte{1, 2, 3, 4}
 	ptr, length := getBufferPtr(buf)
-	if ptr == 0 {
+	if ptr == nil {
 		t.Error("expected non-zero pointer")
 	}
 	if length != 4 {
@@ -679,7 +691,7 @@ func TestGetBufferPtr_Bytes(t *testing.T) {
 func TestGetBufferPtr_EmptyBytes(t *testing.T) {
 	buf := []byte{}
 	ptr, length := getBufferPtr(buf)
-	if ptr != 0 {
+	if ptr != nil {
 		t.Errorf("expected zero pointer for empty slice, got %d", ptr)
 	}
 	if length != 0 {
@@ -690,7 +702,7 @@ func TestGetBufferPtr_EmptyBytes(t *testing.T) {
 func TestGetBufferPtr_Int64(t *testing.T) {
 	val := int64(42)
 	ptr, length := getBufferPtr(&val)
-	if ptr == 0 {
+	if ptr == nil {
 		t.Error("expected non-zero pointer")
 	}
 	if length != 8 {
@@ -701,7 +713,7 @@ func TestGetBufferPtr_Int64(t *testing.T) {
 func TestGetBufferPtr_Float64(t *testing.T) {
 	val := float64(3.14)
 	ptr, length := getBufferPtr(&val)
-	if ptr == 0 {
+	if ptr == nil {
 		t.Error("expected non-zero pointer")
 	}
 	if length != 8 {
@@ -712,7 +724,7 @@ func TestGetBufferPtr_Float64(t *testing.T) {
 func TestGetBufferPtr_Timestamp(t *testing.T) {
 	ts := SQL_TIMESTAMP_STRUCT{Year: 2024, Month: 6, Day: 15}
 	ptr, length := getBufferPtr(&ts)
-	if ptr == 0 {
+	if ptr == nil {
 		t.Error("expected non-zero pointer")
 	}
 	if length == 0 {
@@ -722,7 +734,7 @@ func TestGetBufferPtr_Timestamp(t *testing.T) {
 
 func TestGetBufferPtr_Nil(t *testing.T) {
 	ptr, length := getBufferPtr(nil)
-	if ptr != 0 {
+	if ptr != nil {
 		t.Errorf("expected zero pointer for nil, got %d", ptr)
 	}
 	if length != 0 {
@@ -888,7 +900,7 @@ func TestConvertToODBC_WideString(t *testing.T) {
 func TestGetBufferPtr_Uint16Slice(t *testing.T) {
 	buf := []uint16{0x0048, 0x0069, 0}
 	ptr, length := getBufferPtr(buf)
-	if ptr == 0 {
+	if ptr == nil {
 		t.Error("expected non-zero pointer")
 	}
 	if length != 6 { // 3 code units * 2 bytes
@@ -1117,7 +1129,7 @@ func TestConvertToODBC_IntervalDaySecond(t *testing.T) {
 func TestGetBufferPtr_IntervalStruct(t *testing.T) {
 	is := SQL_INTERVAL_STRUCT{IntervalType: SQL_INTERVAL_DAY}
 	ptr, length := getBufferPtr(&is)
-	if ptr == 0 {
+	if ptr == nil {
 		t.Error("expected non-zero pointer")
 	}
 	if length == 0 {
@@ -1824,7 +1836,7 @@ func TestColumnBuffer_GetColumnBufferPtr(t *testing.T) {
 		Data: []int64{1, 2, 3},
 	}
 	ptr := buf.GetColumnBufferPtr()
-	if ptr == 0 {
+	if ptr == nil {
 		t.Error("expected non-zero pointer")
 	}
 
@@ -1833,7 +1845,7 @@ func TestColumnBuffer_GetColumnBufferPtr(t *testing.T) {
 		Data: []float64{1.5, 2.5},
 	}
 	ptr2 := buf2.GetColumnBufferPtr()
-	if ptr2 == 0 {
+	if ptr2 == nil {
 		t.Error("expected non-zero pointer for float64")
 	}
 
@@ -1842,7 +1854,7 @@ func TestColumnBuffer_GetColumnBufferPtr(t *testing.T) {
 		Data: []byte{1, 2, 3, 4},
 	}
 	ptr3 := buf3.GetColumnBufferPtr()
-	if ptr3 == 0 {
+	if ptr3 == nil {
 		t.Error("expected non-zero pointer for bytes")
 	}
 }
@@ -2097,5 +2109,584 @@ func TestCStmtText(t *testing.T) {
 		}
 		// &buf[0] must be valid even for the empty-query case.
 		_ = &buf[0]
+	}
+}
+
+// growStack makes the goroutine stack grow by more than 1 MB.
+//
+//go:noinline
+func growStack(n int) byte {
+	var pad [16384]byte
+	pad[n%len(pad)] = byte(n)
+	if n == 0 {
+		return pad[0]
+	}
+	return growStack(n-1) + pad[(n*7)%len(pad)]
+}
+
+// moveStack grows the stack and runs the GC, like a busy process.
+func moveStack() {
+	growStack(64)
+	runtime.GC()
+}
+
+// TestGetDataTargetSurvivesStackMove checks that each fixed-size getter reads
+// the value that the driver writes, also when the stack moves during the call.
+func TestGetDataTargetSurvivesStackMove(t *testing.T) {
+	origFetch, origGetData := sqlFetch, sqlGetData
+	t.Cleanup(func() { sqlFetch, sqlGetData = origFetch, origGetData })
+
+	sqlFetch = func(stmt SQLHSTMT) SQLRETURN { return SQL_SUCCESS }
+	sqlGetData = func(stmt SQLHSTMT, col SQLUSMALLINT, ctype SQLSMALLINT, target unsafe.Pointer, bufLen SQLLEN, ind *SQLLEN) SQLRETURN {
+		moveStack()
+		p := target
+		switch ctype {
+		case SQL_C_BIT:
+			*(*byte)(p) = 1
+		case SQL_C_STINYINT:
+			*(*int8)(p) = -5
+		case SQL_C_SSHORT:
+			*(*int16)(p) = -1234
+		case SQL_C_SLONG:
+			*(*int32)(p) = -123456
+		case SQL_C_SBIGINT:
+			*(*int64)(p) = 1<<40 + 7
+		case SQL_C_FLOAT:
+			*(*float32)(p) = 1.5
+		case SQL_C_DOUBLE:
+			*(*float64)(p) = 2.25
+		case SQL_C_DATE:
+			*(*SQL_DATE_STRUCT)(p) = SQL_DATE_STRUCT{Year: 2026, Month: 11, Day: 24}
+		case SQL_C_TIME:
+			*(*SQL_TIME_STRUCT)(p) = SQL_TIME_STRUCT{Hour: 13, Minute: 14, Second: 15}
+		case SQL_C_TIMESTAMP:
+			*(*SQL_TIMESTAMP_STRUCT)(p) = SQL_TIMESTAMP_STRUCT{Year: 2026, Month: 11, Day: 24, Hour: 13, Minute: 14, Second: 15, Fraction: 123000000}
+		case SQL_C_GUID:
+			*(*SQL_GUID_STRUCT)(p) = SQL_GUID_STRUCT{Data1: 0x01020304, Data2: 0x0506, Data3: 0x0708, Data4: [8]byte{1, 2, 3, 4, 5, 6, 7, 8}}
+		case SQL_C_INTERVAL_YEAR_TO_MONTH:
+			is := (*SQL_INTERVAL_STRUCT)(p)
+			is.YearMonth.Year, is.YearMonth.Month = 3, 4
+		case SQL_C_INTERVAL_DAY_TO_SECOND:
+			is := (*SQL_INTERVAL_STRUCT)(p)
+			is.DaySecond = SQL_DAY_SECOND_STRUCT{Day: 1, Hour: 2, Minute: 3, Second: 4, Fraction: 5}
+		default:
+			return SQL_ERROR
+		}
+		*ind = SQLLEN(bufLen)
+		return SQL_SUCCESS
+	}
+
+	tests := []struct {
+		name    string
+		colType SQLSMALLINT
+		want    interface{}
+	}{
+		{"bit", SQL_BIT, true},
+		{"tinyint", SQL_TINYINT, int64(-5)},
+		{"smallint", SQL_SMALLINT, int64(-1234)},
+		{"integer", SQL_INTEGER, int64(-123456)},
+		{"bigint", SQL_BIGINT, int64(1<<40 + 7)},
+		{"real", SQL_REAL, float64(1.5)},
+		{"double", SQL_DOUBLE, float64(2.25)},
+		{"date", SQL_TYPE_DATE, time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC)},
+		{"time", SQL_TYPE_TIME, time.Date(0, 1, 1, 13, 14, 15, 0, time.UTC)},
+		{"timestamp", SQL_TYPE_TIMESTAMP, time.Date(2026, 11, 24, 13, 14, 15, 123000000, time.UTC)},
+		{"guid", SQL_GUID, "01020304-0506-0708-0102-030405060708"},
+		{"interval year to month", SQL_INTERVAL_YEAR_TO_MONTH, IntervalYearMonth{Years: 3, Months: 4}},
+		{"interval day to second", SQL_INTERVAL_DAY_TO_SECOND, IntervalDaySecond{Days: 1, Hours: 2, Minutes: 3, Seconds: 4, Nanoseconds: 5}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &Rows{
+				stmt:     &Stmt{},
+				columns:  []string{"c"},
+				colTypes: []SQLSMALLINT{tt.colType},
+				colSizes: []SQLULEN{0},
+			}
+			dest := make([]driver.Value, 1)
+			done := make(chan error)
+			go func() { done <- r.Next(dest) }()
+			if err := <-done; err != nil {
+				t.Fatalf("Next: %v", err)
+			}
+			if !reflect.DeepEqual(dest[0], tt.want) {
+				t.Errorf("got %#v, want %#v", dest[0], tt.want)
+			}
+		})
+	}
+}
+
+// onFreshStack runs f on a new goroutine, which starts with a small stack.
+func onFreshStack(f func()) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f()
+	}()
+	<-done
+}
+
+func TestGetLastInsertIdSurvivesStackMove(t *testing.T) {
+	origAlloc, origFree := sqlAllocHandle, sqlFreeHandle
+	origExec, origFetch, origGetData := sqlExecDirect, sqlFetch, sqlGetData
+	t.Cleanup(func() {
+		sqlAllocHandle, sqlFreeHandle = origAlloc, origFree
+		sqlExecDirect, sqlFetch, sqlGetData = origExec, origFetch, origGetData
+	})
+	t.Setenv("GODBC_EXEC_MODE", "")
+
+	sqlAllocHandle = func(ht SQLSMALLINT, in SQLHANDLE, out *SQLHANDLE) SQLRETURN {
+		*out = 7
+		return SQL_SUCCESS
+	}
+	sqlFreeHandle = func(ht SQLSMALLINT, h SQLHANDLE) SQLRETURN { return SQL_SUCCESS }
+	sqlExecDirect = func(stmt SQLHSTMT, text *byte, n SQLINTEGER) SQLRETURN { return SQL_SUCCESS }
+	sqlFetch = func(stmt SQLHSTMT) SQLRETURN { return SQL_SUCCESS }
+	sqlGetData = func(stmt SQLHSTMT, col SQLUSMALLINT, ctype SQLSMALLINT, target unsafe.Pointer, bufLen SQLLEN, ind *SQLLEN) SQLRETURN {
+		moveStack()
+		*(*int64)(target) = 1002
+		*ind = 8
+		return SQL_SUCCESS
+	}
+
+	c := &Conn{dbc: 1, dbType: "microsoft sql server", lastInsertIdBehavior: LastInsertIdAuto}
+	var got int64
+	onFreshStack(func() { got = c.getLastInsertId() })
+	if got != 1002 {
+		t.Errorf("got %d, want 1002", got)
+	}
+}
+
+func TestColAttributeAndGetInfoSurviveStackMove(t *testing.T) {
+	origNum, origDescribe, origAttr, origInfo := sqlNumResultCols, sqlDescribeCol, sqlColAttribute, sqlGetInfo
+	t.Cleanup(func() {
+		sqlNumResultCols, sqlDescribeCol, sqlColAttribute, sqlGetInfo = origNum, origDescribe, origAttr, origInfo
+	})
+
+	sqlNumResultCols = func(stmt SQLHSTMT, n *SQLSMALLINT) SQLRETURN {
+		*n = 1
+		return SQL_SUCCESS
+	}
+	sqlDescribeCol = func(stmt SQLHSTMT, col SQLUSMALLINT, name *byte, bufLen SQLSMALLINT, nameLen *SQLSMALLINT, dataType *SQLSMALLINT, colSize *SQLULEN, dec *SQLSMALLINT, nullable *SQLSMALLINT) SQLRETURN {
+		copy(unsafe.Slice(name, int(bufLen)), "id")
+		*nameLen = 2
+		*dataType = SQL_BIGINT
+		return SQL_SUCCESS
+	}
+	sqlColAttribute = func(stmt SQLHSTMT, col SQLUSMALLINT, field SQLUSMALLINT, attr unsafe.Pointer, bufLen SQLSMALLINT, strLen *SQLSMALLINT, num *SQLLEN) SQLRETURN {
+		moveStack()
+		copy(fakeBytes(attr, int(bufLen)), "BIGINT\x00")
+		*strLen = 6
+		return SQL_SUCCESS
+	}
+	sqlGetInfo = func(dbc SQLHDBC, infoType SQLUSMALLINT, value unsafe.Pointer, bufLen SQLSMALLINT, strLen *SQLSMALLINT) SQLRETURN {
+		const name = "Test DBMS"
+		*strLen = SQLSMALLINT(len(name))
+		if value != nil {
+			moveStack()
+			copy(fakeBytes(value, int(bufLen)), name+"\x00")
+		}
+		return SQL_SUCCESS
+	}
+
+	var rows *Rows
+	var err error
+	onFreshStack(func() { rows, err = newRows(&Stmt{}, false) })
+	if err != nil {
+		t.Fatalf("newRows: %v", err)
+	}
+	if len(rows.nativeTypes) != 1 || rows.nativeTypes[0] != "BIGINT" {
+		t.Errorf("nativeTypes = %v, want [BIGINT]", rows.nativeTypes)
+	}
+
+	c := &Conn{dbc: 1}
+	onFreshStack(c.detectDatabaseType)
+	if c.dbType != "Test DBMS" {
+		t.Errorf("dbType = %q, want %q", c.dbType, "Test DBMS")
+	}
+}
+
+func TestExecBatchResetsPointerAttrs(t *testing.T) {
+	origSetAttr, origSetAttrPtr := sqlSetStmtAttr, sqlSetStmtAttrPtr
+	origBind, origExecute, origRowCount, origFreeStmt := sqlBindParameter, sqlExecute, sqlRowCount, sqlFreeStmt
+	origDiag := sqlGetDiagRec
+	t.Cleanup(func() {
+		sqlSetStmtAttr, sqlSetStmtAttrPtr = origSetAttr, origSetAttrPtr
+		sqlBindParameter, sqlExecute, sqlRowCount, sqlFreeStmt = origBind, origExecute, origRowCount, origFreeStmt
+		sqlGetDiagRec = origDiag
+	})
+
+	const numRows = 5
+	var (
+		failBind              bool
+		paramsetSize          uintptr
+		statusPtr, procPtr    unsafe.Pointer
+		dataPtr               unsafe.Pointer
+		resetParams, executes int
+		gotValues             []int64
+	)
+	sqlGetDiagRec = func(ht SQLSMALLINT, h SQLHANDLE, rec SQLSMALLINT, state *byte, native *SQLINTEGER, msg *byte, bufLen SQLSMALLINT, msgLen *SQLSMALLINT) SQLRETURN {
+		return SQL_NO_DATA
+	}
+	sqlSetStmtAttr = func(stmt SQLHSTMT, attr SQLINTEGER, value uintptr, strLen SQLINTEGER) SQLRETURN {
+		if attr == SQL_ATTR_PARAMSET_SIZE {
+			paramsetSize = value
+		}
+		return SQL_SUCCESS
+	}
+	sqlSetStmtAttrPtr = func(stmt SQLHSTMT, attr SQLINTEGER, value unsafe.Pointer, strLen SQLINTEGER) SQLRETURN {
+		switch attr {
+		case SQL_ATTR_PARAM_STATUS_PTR:
+			statusPtr = value
+		case SQL_ATTR_PARAMS_PROCESSED_PTR:
+			procPtr = value
+		}
+		return SQL_SUCCESS
+	}
+	sqlBindParameter = func(stmt SQLHSTMT, n SQLUSMALLINT, io, vt, pt SQLSMALLINT, colSize SQLULEN, dec SQLSMALLINT, p unsafe.Pointer, bl SQLLEN, ind *SQLLEN) SQLRETURN {
+		if failBind {
+			return SQL_ERROR
+		}
+		dataPtr = p
+		return SQL_SUCCESS
+	}
+	sqlExecute = func(stmt SQLHSTMT) SQLRETURN {
+		executes++
+		moveStack()
+		gotValues = append([]int64(nil), unsafe.Slice((*int64)(dataPtr), numRows)...)
+		status := unsafe.Slice((*SQLUSMALLINT)(statusPtr), numRows)
+		for i := range status {
+			status[i] = SQL_PARAM_SUCCESS
+		}
+		*(*SQLULEN)(procPtr) = numRows
+		return SQL_SUCCESS
+	}
+	sqlRowCount = func(stmt SQLHSTMT, n *SQLLEN) SQLRETURN {
+		*n = numRows
+		return SQL_SUCCESS
+	}
+	sqlFreeStmt = func(stmt SQLHSTMT, option SQLUSMALLINT) SQLRETURN {
+		if option == SQL_RESET_PARAMS {
+			resetParams++
+		}
+		return SQL_SUCCESS
+	}
+
+	sets := make([][]driver.NamedValue, numRows)
+	for i := range sets {
+		sets[i] = []driver.NamedValue{{Ordinal: 1, Value: int64(i * 10)}}
+	}
+	newStmt := func() *Stmt { return &Stmt{conn: &Conn{}, stmt: 1} }
+
+	check := func(t *testing.T) {
+		t.Helper()
+		if statusPtr != nil || procPtr != nil {
+			t.Errorf("pointer attributes not reset: status %p, processed %p", statusPtr, procPtr)
+		}
+		if paramsetSize != 1 {
+			t.Errorf("PARAMSET_SIZE = %d, want 1", paramsetSize)
+		}
+		if resetParams == 0 {
+			t.Error("SQL_RESET_PARAMS was not called")
+		}
+	}
+
+	t.Run("array binding", func(t *testing.T) {
+		var res *BatchResult
+		var err error
+		onFreshStack(func() { res, err = newStmt().ExecBatch(context.Background(), sets) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if executes != 1 {
+			t.Fatalf("executes = %d, want 1 (array binding)", executes)
+		}
+		for i, n := range res.RowCounts {
+			if n != 1 {
+				t.Errorf("RowCounts[%d] = %d, want 1", i, n)
+			}
+		}
+		if res.TotalRowsAffected != numRows {
+			t.Errorf("TotalRowsAffected = %d, want %d", res.TotalRowsAffected, numRows)
+		}
+		for i, v := range gotValues {
+			if v != int64(i*10) {
+				t.Errorf("bound value %d = %d, want %d", i, v, i*10)
+			}
+		}
+		check(t)
+	})
+
+	t.Run("bind failure falls back", func(t *testing.T) {
+		failBind = true
+		statusPtr, procPtr, paramsetSize, resetParams, executes = nil, nil, 0, 0, 0
+		var res *BatchResult
+		var err error
+		onFreshStack(func() { res, err = newStmt().ExecBatch(context.Background(), sets) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if executes != 0 {
+			t.Errorf("executes = %d, want 0", executes)
+		}
+		if !res.HasErrors() {
+			t.Error("want row errors after the bind failure")
+		}
+		check(t)
+	})
+}
+
+func TestBindNamedParamsIndicatorsStable(t *testing.T) {
+	orig := sqlBindParameter
+	t.Cleanup(func() { sqlBindParameter = orig })
+
+	recorded := map[SQLUSMALLINT]*SQLLEN{}
+	sqlBindParameter = func(stmt SQLHSTMT, n SQLUSMALLINT, io, vt, pt SQLSMALLINT, colSize SQLULEN, dec SQLSMALLINT, p unsafe.Pointer, bl SQLLEN, ind *SQLLEN) SQLRETURN {
+		recorded[n] = ind
+		return SQL_SUCCESS
+	}
+
+	names := []string{"a", "b", "c", "d", "e", "f"}
+	for run := 0; run < 20; run++ {
+		recorded = map[SQLUSMALLINT]*SQLLEN{}
+		np := &NamedParams{Names: names, Positions: map[string][]int{}}
+		args := make([]driver.NamedValue, len(names))
+		for i, n := range names {
+			np.Positions[n] = []int{i + 1}
+			args[i] = driver.NamedValue{Name: n, Value: int64(i)}
+		}
+		s := &Stmt{conn: &Conn{}, stmt: 1, namedParams: np}
+		if err := s.bindNamedParams(args); err != nil {
+			t.Fatal(err)
+		}
+		if len(s.paramLengths) != len(names) {
+			t.Fatalf("len(paramLengths) = %d, want %d", len(s.paramLengths), len(names))
+		}
+		for pos := 1; pos <= len(names); pos++ {
+			if recorded[SQLUSMALLINT(pos)] != s.paramLengths[pos-1] {
+				t.Fatalf("run %d: indicator of position %d is not the cell of paramLengths", run, pos)
+			}
+		}
+	}
+}
+
+func TestGetDataNoAllocWhenDebugOff(t *testing.T) {
+	if logger.Enabled() {
+		t.Skip("GODBC_DEBUG is set")
+	}
+	orig := sqlGetData
+	t.Cleanup(func() { sqlGetData = orig })
+	sqlGetData = func(stmt SQLHSTMT, col SQLUSMALLINT, ctype SQLSMALLINT, target unsafe.Pointer, bufLen SQLLEN, ind *SQLLEN) SQLRETURN {
+		*(*int64)(target) = 42
+		*ind = 8
+		return SQL_SUCCESS
+	}
+
+	r := &Rows{stmt: &Stmt{}}
+	if allocs := testing.AllocsPerRun(1000, func() { r.getInt64(1) }); allocs != 0 {
+		t.Errorf("allocs per getInt64 = %v, want 0", allocs)
+	}
+}
+
+func TestLoggerEnabled(t *testing.T) {
+	t.Setenv("GODBC_DEBUG", "")
+	if (&Logger{}).Enabled() {
+		t.Error("Enabled() = true with GODBC_DEBUG unset")
+	}
+	t.Setenv("GODBC_DEBUG", "1")
+	if !(&Logger{}).Enabled() {
+		t.Error("Enabled() = false with GODBC_DEBUG=1")
+	}
+}
+
+// TestNoUintptrPointerConversionInCalls guards against a regression: a uintptr
+// made from a Go pointer is not a pointer to the GC, and it does not follow a
+// stack move.
+func TestNoUintptrPointerConversionInCalls(t *testing.T) {
+	fset := token.NewFileSet()
+	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return err
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok || len(call.Args) != 1 {
+				return true
+			}
+			if id, ok := call.Fun.(*ast.Ident); !ok || id.Name != "uintptr" {
+				return true
+			}
+			inner, ok := call.Args[0].(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if sel, ok := inner.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Pointer" {
+				if x, ok := sel.X.(*ast.Ident); ok && x.Name == "unsafe" {
+					t.Errorf("%s: uintptr(unsafe.Pointer(...))", fset.Position(call.Pos()))
+				}
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestIntegrationGetDataUnderGCPressure reads 200,000 rows through a real ODBC
+// driver while goroutines grow stacks and run the GC.
+// Set GODBC_TEST_CONN to a connection string and GODBC_TEST_DIALECT to mssql
+// (default) or sqlite.
+func TestIntegrationGetDataUnderGCPressure(t *testing.T) {
+	conn := os.Getenv("GODBC_TEST_CONN")
+	if conn == "" {
+		t.Skip("GODBC_TEST_CONN is not set")
+	}
+	const total = 200000
+
+	var query string
+	switch dialect := os.Getenv("GODBC_TEST_DIALECT"); dialect {
+	case "", "mssql":
+		query = `WITH t AS (
+  SELECT TOP (200000) CAST(ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS BIGINT) AS n
+  FROM sys.all_columns a CROSS JOIN sys.all_columns b)
+SELECT n,
+  CAST(n AS INT),
+  CAST(n * 1000003 AS BIGINT),
+  CAST(n % 30000 AS SMALLINT),
+  CAST(n % 2 AS BIT),
+  CAST(n % 1000 AS REAL),
+  CAST(n AS FLOAT) / 4,
+  DATEADD(day, CAST(n % 1000 AS INT), CAST('2020-01-01' AS DATE)),
+  DATEADD(second, CAST(n AS INT), CAST('2020-01-01T00:00:00' AS DATETIME2)),
+  CONVERT(UNIQUEIDENTIFIER, '00000000-0000-0000-0000-' + RIGHT('000000000000' + CAST(n AS VARCHAR(12)), 12)),
+  'v' + CAST(n AS VARCHAR(12))
+FROM t ORDER BY n`
+	case "sqlite":
+		query = `WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 200000)
+SELECT n, n, n * 1000003, n % 30000, n % 2, CAST(n % 1000 AS REAL), CAST(n AS REAL) / 4,
+  date('2020-01-01', '+' || (n % 1000) || ' days'),
+  datetime('2020-01-01 00:00:00', '+' || n || ' seconds'),
+  '00000000-0000-0000-0000-' || substr('000000000000' || n, -12),
+  'v' || n
+FROM t`
+	default:
+		t.Fatalf("unknown GODBC_TEST_DIALECT %q", dialect)
+	}
+
+	db, err := sql.Open("odbc", conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// GC pressure: deep recursion, allocation and forced collections.
+	old := debug.SetGCPercent(1)
+	defer debug.SetGCPercent(old)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var sink [][]byte
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				growStack(8)
+				sink = append(sink[:0], make([]byte, 1<<16))
+				runtime.GC()
+				time.Sleep(time.Millisecond)
+			}
+		}()
+	}
+	defer func() {
+		close(stop)
+		wg.Wait()
+	}()
+
+	rows, err := db.Query(query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+
+	asInt := func(v interface{}) (int64, bool) {
+		switch x := v.(type) {
+		case int64:
+			return x, true
+		case bool:
+			if x {
+				return 1, true
+			}
+			return 0, true
+		}
+		return 0, false
+	}
+	asText := func(v interface{}, layout string) string {
+		if tm, ok := v.(time.Time); ok {
+			return tm.Format(layout)
+		}
+		return fmt.Sprint(v)
+	}
+
+	base := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	count := 0
+	for rows.Next() {
+		vals := make([]interface{}, 11)
+		ptrs := make([]interface{}, 11)
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			t.Fatalf("row %d: %v", count+1, err)
+		}
+		n, _ := asInt(vals[0])
+		if n != int64(count+1) {
+			t.Fatalf("row %d: n = %v", count+1, vals[0])
+		}
+		wantInts := []int64{n, n * 1000003, n % 30000, n % 2}
+		for i, want := range wantInts {
+			if got, ok := asInt(vals[1+i]); !ok || got != want {
+				t.Fatalf("n=%d: column %d = %#v, want %d", n, 1+i, vals[1+i], want)
+			}
+		}
+		if got, ok := vals[5].(float64); !ok || got != float64(float32(n%1000)) {
+			t.Fatalf("n=%d: real = %#v", n, vals[5])
+		}
+		if got, ok := vals[6].(float64); !ok || got != float64(n)/4 {
+			t.Fatalf("n=%d: float = %#v", n, vals[6])
+		}
+		if got, want := asText(vals[7], "2006-01-02"), base.AddDate(0, 0, int(n%1000)).Format("2006-01-02"); got != want {
+			t.Fatalf("n=%d: date = %q, want %q", n, got, want)
+		}
+		if got, want := asText(vals[8], "2006-01-02 15:04:05"), base.Add(time.Duration(n)*time.Second).Format("2006-01-02 15:04:05"); !strings.HasPrefix(got, want) {
+			t.Fatalf("n=%d: timestamp = %q, want %q", n, got, want)
+		}
+		if got, want := fmt.Sprint(vals[9]), fmt.Sprintf("00000000-0000-0000-0000-%012d", n); got != want {
+			t.Fatalf("n=%d: guid = %q, want %q", n, got, want)
+		}
+		if got, want := fmt.Sprint(vals[10]), fmt.Sprintf("v%d", n); got != want {
+			t.Fatalf("n=%d: varchar = %q, want %q", n, got, want)
+		}
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if count != total {
+		t.Fatalf("read %d rows, want %d", count, total)
 	}
 }

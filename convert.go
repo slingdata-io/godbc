@@ -324,65 +324,65 @@ func convertToODBC(value interface{}) (interface{}, SQLSMALLINT, SQLSMALLINT, SQ
 }
 
 // getBufferPtr returns a pointer to the buffer data and its length
-func getBufferPtr(buf interface{}) (uintptr, SQLLEN) {
+func getBufferPtr(buf interface{}) (unsafe.Pointer, SQLLEN) {
 	switch v := buf.(type) {
 	case []byte:
 		if len(v) == 0 {
-			return 0, 0
+			return nil, 0
 		}
-		return uintptr(unsafe.Pointer(&v[0])), SQLLEN(len(v))
+		return unsafe.Pointer(&v[0]), SQLLEN(len(v))
 
 	case *int8:
-		return uintptr(unsafe.Pointer(v)), 1
+		return unsafe.Pointer(v), 1
 
 	case *int16:
-		return uintptr(unsafe.Pointer(v)), 2
+		return unsafe.Pointer(v), 2
 
 	case *int32:
-		return uintptr(unsafe.Pointer(v)), 4
+		return unsafe.Pointer(v), 4
 
 	case *int64:
-		return uintptr(unsafe.Pointer(v)), 8
+		return unsafe.Pointer(v), 8
 
 	case *uint8: // same as *byte
-		return uintptr(unsafe.Pointer(v)), 1
+		return unsafe.Pointer(v), 1
 
 	case *uint16:
-		return uintptr(unsafe.Pointer(v)), 2
+		return unsafe.Pointer(v), 2
 
 	case *uint32:
-		return uintptr(unsafe.Pointer(v)), 4
+		return unsafe.Pointer(v), 4
 
 	case *uint64:
-		return uintptr(unsafe.Pointer(v)), 8
+		return unsafe.Pointer(v), 8
 
 	case *float32:
-		return uintptr(unsafe.Pointer(v)), 4
+		return unsafe.Pointer(v), 4
 
 	case *float64:
-		return uintptr(unsafe.Pointer(v)), 8
+		return unsafe.Pointer(v), 8
 
 	case *SQL_TIMESTAMP_STRUCT:
-		return uintptr(unsafe.Pointer(v)), SQLLEN(unsafe.Sizeof(*v))
+		return unsafe.Pointer(v), SQLLEN(unsafe.Sizeof(*v))
 
 	case *SQL_DATE_STRUCT:
-		return uintptr(unsafe.Pointer(v)), SQLLEN(unsafe.Sizeof(*v))
+		return unsafe.Pointer(v), SQLLEN(unsafe.Sizeof(*v))
 
 	case *SQL_TIME_STRUCT:
-		return uintptr(unsafe.Pointer(v)), SQLLEN(unsafe.Sizeof(*v))
+		return unsafe.Pointer(v), SQLLEN(unsafe.Sizeof(*v))
 
 	case []uint16:
 		// For wide strings (UTF-16)
 		if len(v) == 0 {
-			return 0, 0
+			return nil, 0
 		}
-		return uintptr(unsafe.Pointer(&v[0])), SQLLEN(len(v) * 2)
+		return unsafe.Pointer(&v[0]), SQLLEN(len(v) * 2)
 
 	case *SQL_INTERVAL_STRUCT:
-		return uintptr(unsafe.Pointer(v)), SQLLEN(unsafe.Sizeof(*v))
+		return unsafe.Pointer(v), SQLLEN(unsafe.Sizeof(*v))
 
 	default:
-		return 0, 0
+		return nil, 0
 	}
 }
 
@@ -691,34 +691,34 @@ func allocateColumnArray(values []interface{}, numRows int, mode wcharMode) (*Co
 }
 
 // GetColumnBufferPtr returns a pointer to the start of the column buffer data
-func (cb *ColumnBuffer) GetColumnBufferPtr() uintptr {
+func (cb *ColumnBuffer) GetColumnBufferPtr() unsafe.Pointer {
 	switch v := cb.Data.(type) {
 	case []byte:
 		if len(v) > 0 {
-			return uintptr(unsafe.Pointer(&v[0]))
+			return unsafe.Pointer(&v[0])
 		}
 	case []int64:
 		if len(v) > 0 {
-			return uintptr(unsafe.Pointer(&v[0]))
+			return unsafe.Pointer(&v[0])
 		}
 	case []int32:
 		if len(v) > 0 {
-			return uintptr(unsafe.Pointer(&v[0]))
+			return unsafe.Pointer(&v[0])
 		}
 	case []float64:
 		if len(v) > 0 {
-			return uintptr(unsafe.Pointer(&v[0]))
+			return unsafe.Pointer(&v[0])
 		}
 	case []float32:
 		if len(v) > 0 {
-			return uintptr(unsafe.Pointer(&v[0]))
+			return unsafe.Pointer(&v[0])
 		}
 	case []SQL_TIMESTAMP_STRUCT:
 		if len(v) > 0 {
-			return uintptr(unsafe.Pointer(&v[0]))
+			return unsafe.Pointer(&v[0])
 		}
 	}
-	return 0
+	return nil
 }
 
 // SQLTypeName returns a human-readable name for an SQL type

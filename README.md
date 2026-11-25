@@ -432,7 +432,8 @@ Example output:
 time=... level=DEBUG msg="ffi call" fn=SQLExecDirect stmt=0x7f... textLen=8 query="SELECT 1" buffer="len=9 ptr=0x... 00000000 53 45 4c 45 43 54 20 31 00 \"SELECT 1.\""
 ```
 
-This is zero-overhead unless `GODBC_DEBUG=1`. When filing a bug, attach the
+This is zero-overhead unless `GODBC_DEBUG=1`. The debug guard skips argument
+formatting. When filing a bug, attach the
 trace — the connection-string password is redacted (`PWD=***`), but review the
 log before sharing.
 

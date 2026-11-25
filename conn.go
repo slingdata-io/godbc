@@ -11,11 +11,6 @@ import (
 	"unsafe"
 )
 
-// unsafePointer is a helper to get a uintptr from a pointer
-func unsafePointer(ptr *int64) unsafe.Pointer {
-	return unsafe.Pointer(ptr)
-}
-
 // lastInsertIdQueries maps database types to their identity queries
 var lastInsertIdQueries = map[string]string{
 	"microsoft sql server": "SELECT SCOPE_IDENTITY()",
@@ -500,14 +495,14 @@ func (c *Conn) getLastInsertId() int64 {
 	}
 
 	// Get the value
-	var value int64
-	var indicator SQLLEN
-	ret = GetData(stmtHandle, 1, SQL_C_SBIGINT, uintptr(unsafePointer(&value)), 8, &indicator)
-	if !IsSuccess(ret) || indicator == SQL_NULL_DATA {
+	value := new(int64)
+	indicator := new(SQLLEN)
+	ret = GetData(stmtHandle, 1, SQL_C_SBIGINT, unsafe.Pointer(value), 8, indicator)
+	if !IsSuccess(ret) || *indicator == SQL_NULL_DATA {
 		return 0
 	}
 
-	return value
+	return *value
 }
 
 // getInfoString returns a string value of SQLGetInfo.

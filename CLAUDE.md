@@ -56,6 +56,10 @@ errors.go        → ODBC diagnostic record retrieval and error types
 
 - **Data Retrieval**: `rows.go` uses `SQLGetData` with type-specific methods (`getBool`, `getInt64`, `getString`, etc.). Large strings/blobs handle truncation via multiple fetch calls.
 
+- **Pointers to the driver**: Never give `uintptr(unsafe.Pointer(&x))` to a purego function. The GC does not follow a `uintptr`, and a stack move leaves it stale. Use `unsafe.Pointer` or `*T` parameters. Memory that the driver keeps (bound parameters, statement pointer attributes) must have a Go reference until it is unbound. `TestNoUintptrPointerConversionInCalls` checks the source.
+
+- **Debug logging**: Guard each `logger.Debug(...)` call with `if logger.Enabled()`, so that the arguments are not formatted when tracing is off.
+
 - **DECIMAL/NUMERIC**: Retrieved as strings to preserve precision. `ColumnTypePrecisionScale()` returns precision/scale metadata.
 
 - **Timestamps**: Converted with millisecond precision for database compatibility (via `SQL_TIMESTAMP_STRUCT`).

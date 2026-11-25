@@ -22,7 +22,8 @@ import (
 // line survives a C-side abort() that never returns to Go.
 //
 // This is zero-overhead unless GODBC_DEBUG=1 (a single sync.Once-guarded
-// pointer load per call when disabled).
+// pointer load per call when disabled). Each call site checks Enabled first,
+// so the arguments of a disabled trace are never formatted.
 
 // Logger traces ODBC FFI calls. The zero value is unusable; use the package
 // logger instance, which lazily initializes from GODBC_DEBUG.
@@ -55,10 +56,20 @@ func (l *Logger) init() {
 	})
 }
 
+// Enabled reports whether FFI tracing is on (GODBC_DEBUG=1).
+func (l *Logger) Enabled() bool {
+	l.init()
+	return l.slog != nil
+}
+
 // Debug logs an FFI call about to be made, with its arguments. It is a no-op
-// unless GODBC_DEBUG=1. Call it immediately before the native call:
+// unless GODBC_DEBUG=1. Guard the call with Enabled, so that the arguments
+// are not formatted when tracing is off. Call it immediately before the
+// native call:
 //
-//	logger.Debug("SQLExecDirect", "stmt", fmt.Sprintf("%#x", h), "textLen", n)
+//	if logger.Enabled() {
+//		logger.Debug("SQLExecDirect", "stmt", fmt.Sprintf("%#x", h), "textLen", n)
+//	}
 func (l *Logger) Debug(name string, args ...any) {
 	l.init()
 	if l.slog == nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 	"unsafe"
@@ -39,7 +40,7 @@ type Stmt struct {
 
 	// Parameter buffers - kept alive during execution
 	paramBuffers []interface{}
-	paramLengths []SQLLEN
+	paramLengths []*SQLLEN // one heap cell for each bound parameter; the driver keeps the addresses
 
 	// Output parameter tracking
 	outputParams []outputParamInfo
@@ -253,7 +254,7 @@ func (s *Stmt) bindParams(args []driver.NamedValue) error {
 
 	// Clear previous parameter buffers
 	s.paramBuffers = make([]interface{}, len(args))
-	s.paramLengths = make([]SQLLEN, len(args))
+	s.paramLengths = make([]*SQLLEN, len(args))
 	s.outputParams = nil
 
 	for _, arg := range args {
@@ -275,14 +276,16 @@ func (s *Stmt) bindNamedParams(args []driver.NamedValue) error {
 	// Calculate total number of parameter positions needed
 	totalPositions := 0
 	for _, positions := range s.namedParams.Positions {
-		if len(positions) > totalPositions {
-			totalPositions = positions[len(positions)-1]
+		for _, pos := range positions {
+			if pos > totalPositions {
+				totalPositions = pos
+			}
 		}
 	}
 
 	// Clear previous parameter buffers
 	s.paramBuffers = make([]interface{}, totalPositions)
-	s.paramLengths = make([]SQLLEN, totalPositions)
+	s.paramLengths = make([]*SQLLEN, totalPositions)
 	s.outputParams = nil
 
 	// Build a map from parameter name to value for quick lookup
@@ -342,8 +345,11 @@ func (s *Stmt) bindParam(paramNum SQLUSMALLINT, value interface{}) error {
 		// Extend slices if needed
 		for len(s.paramBuffers) <= idx {
 			s.paramBuffers = append(s.paramBuffers, nil)
-			s.paramLengths = append(s.paramLengths, 0)
+			s.paramLengths = append(s.paramLengths, nil)
 		}
+	}
+	if s.paramLengths[idx] == nil {
+		s.paramLengths[idx] = new(SQLLEN)
 	}
 
 	// Check if this is an output parameter
@@ -387,10 +393,10 @@ func (s *Stmt) bindParam(paramNum SQLUSMALLINT, value interface{}) error {
 
 	// Store buffer to keep it alive
 	s.paramBuffers[idx] = buf
-	s.paramLengths[idx] = length
+	*s.paramLengths[idx] = length
 
 	// Get pointer to data
-	var dataPtr uintptr
+	var dataPtr unsafe.Pointer
 	var bufferLen SQLLEN
 	if buf != nil {
 		dataPtr, bufferLen = getBufferPtr(buf)
@@ -406,7 +412,7 @@ func (s *Stmt) bindParam(paramNum SQLUSMALLINT, value interface{}) error {
 		decDigits,
 		dataPtr,
 		bufferLen,
-		&s.paramLengths[idx],
+		s.paramLengths[idx],
 	)
 
 	if !IsSuccess(ret) {
@@ -419,7 +425,7 @@ func (s *Stmt) bindParam(paramNum SQLUSMALLINT, value interface{}) error {
 			index:     idx,
 			direction: direction,
 			buffer:    buf,
-			length:    &s.paramLengths[idx],
+			length:    s.paramLengths[idx],
 			cType:     cType,
 			goType:    actualValue,
 		})
@@ -713,6 +719,9 @@ func (s *Stmt) execBatchArrayBinding(ctx context.Context, paramSets [][]driver.N
 		return false
 	}
 
+	// The driver keeps pointers to the batch memory until the attributes are reset.
+	defer s.resetBatchAttrs()
+
 	// Set up array binding
 	// Set paramset size
 	ret := SetStmtAttr(s.stmt, SQL_ATTR_PARAMSET_SIZE, uintptr(numRows), 0)
@@ -723,24 +732,20 @@ func (s *Stmt) execBatchArrayBinding(ctx context.Context, paramSets [][]driver.N
 	// Set column-wise binding
 	ret = SetStmtAttr(s.stmt, SQL_ATTR_PARAM_BIND_TYPE, SQL_PARAM_BIND_BY_COLUMN, 0)
 	if !IsSuccess(ret) {
-		// Reset paramset size and fall back
-		SetStmtAttr(s.stmt, SQL_ATTR_PARAMSET_SIZE, 1, 0)
 		return false
 	}
 
 	// Allocate status array for per-row results
 	statusArray := make([]SQLUSMALLINT, numRows)
-	ret = SetStmtAttr(s.stmt, SQL_ATTR_PARAM_STATUS_PTR, uintptr(unsafe.Pointer(&statusArray[0])), 0)
+	ret = SetStmtAttrPtr(s.stmt, SQL_ATTR_PARAM_STATUS_PTR, unsafe.Pointer(&statusArray[0]), 0)
 	if !IsSuccess(ret) {
-		SetStmtAttr(s.stmt, SQL_ATTR_PARAMSET_SIZE, 1, 0)
 		return false
 	}
 
 	// Track number of rows processed
-	var rowsProcessed SQLULEN
-	ret = SetStmtAttr(s.stmt, SQL_ATTR_PARAMS_PROCESSED_PTR, uintptr(unsafe.Pointer(&rowsProcessed)), 0)
+	rowsProcessed := new(SQLULEN)
+	ret = SetStmtAttrPtr(s.stmt, SQL_ATTR_PARAMS_PROCESSED_PTR, unsafe.Pointer(rowsProcessed), 0)
 	if !IsSuccess(ret) {
-		SetStmtAttr(s.stmt, SQL_ATTR_PARAMSET_SIZE, 1, 0)
 		return false
 	}
 
@@ -759,9 +764,6 @@ func (s *Stmt) execBatchArrayBinding(ctx context.Context, paramSets [][]driver.N
 		// Allocate the column buffer
 		colBuf, err := allocateColumnArray(values, numRows, s.conn.wcharMode)
 		if err != nil || colBuf == nil {
-			// Reset and fall back
-			SetStmtAttr(s.stmt, SQL_ATTR_PARAMSET_SIZE, 1, 0)
-			FreeStmt(s.stmt, SQL_RESET_PARAMS)
 			return false
 		}
 		columnBuffers[paramIdx] = colBuf
@@ -781,14 +783,16 @@ func (s *Stmt) execBatchArrayBinding(ctx context.Context, paramSets [][]driver.N
 			&colBuf.Lengths[0],
 		)
 		if !IsSuccess(ret) {
-			SetStmtAttr(s.stmt, SQL_ATTR_PARAMSET_SIZE, 1, 0)
-			FreeStmt(s.stmt, SQL_RESET_PARAMS)
 			return false
 		}
 	}
 
 	// Execute the batch
 	ret = Execute(s.stmt)
+	// The driver reads and writes this memory during Execute.
+	runtime.KeepAlive(columnBuffers)
+	runtime.KeepAlive(statusArray)
+	runtime.KeepAlive(rowsProcessed)
 
 	// Process results
 	if IsSuccess(ret) || ret == SQL_SUCCESS_WITH_INFO {
@@ -836,11 +840,16 @@ func (s *Stmt) execBatchArrayBinding(ctx context.Context, paramSets [][]driver.N
 		}
 	}
 
-	// Reset for normal operation
-	SetStmtAttr(s.stmt, SQL_ATTR_PARAMSET_SIZE, 1, 0)
-	FreeStmt(s.stmt, SQL_RESET_PARAMS)
-
 	return true
+}
+
+// resetBatchAttrs gives the batch state back to normal.
+// After it runs, the driver holds no pointer into the batch memory.
+func (s *Stmt) resetBatchAttrs() {
+	SetStmtAttr(s.stmt, SQL_ATTR_PARAMSET_SIZE, 1, 0)
+	SetStmtAttrPtr(s.stmt, SQL_ATTR_PARAM_STATUS_PTR, nil, 0)
+	SetStmtAttrPtr(s.stmt, SQL_ATTR_PARAMS_PROCESSED_PTR, nil, 0)
+	FreeStmt(s.stmt, SQL_RESET_PARAMS)
 }
 
 // execBatchRowByRow executes each parameter set individually (fallback)
@@ -848,7 +857,7 @@ func (s *Stmt) execBatchRowByRow(ctx context.Context, paramSets [][]driver.Named
 	for i, params := range paramSets {
 		// Clear and bind parameters for this set
 		s.paramBuffers = make([]interface{}, len(params))
-		s.paramLengths = make([]SQLLEN, len(params))
+		s.paramLengths = make([]*SQLLEN, len(params))
 		s.outputParams = nil
 
 		for _, param := range params {

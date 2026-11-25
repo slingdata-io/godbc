@@ -30,10 +30,39 @@ type Rows struct {
 	nativeTypes []string // native database type names (e.g., "VARCHAR", "DATETIME2", "BIGINT")
 	closed      bool
 	closeStmt   bool // Whether to close the statement when rows are closed
+	cell        *cellBuf
 
 	noMoreResults bool  // SQLMoreResults gave SQL_NO_DATA or IM001
 	peeked        bool  // advance already ran for the next result set
 	peekErr       error // result of that advance: nil, io.EOF or an error
+}
+
+// cellBuf is the heap memory that SQLGetData writes into.
+// A Rows owns one. database/sql calls a Rows from one goroutine at a time.
+type cellBuf struct {
+	ind  SQLLEN
+	u8   byte
+	i8   int8
+	i16  int16
+	i32  int32
+	i64  int64
+	f32  float32
+	f64  float64
+	date SQL_DATE_STRUCT
+	tm   SQL_TIME_STRUCT
+	ts   SQL_TIMESTAMP_STRUCT
+	guid SQL_GUID_STRUCT
+	iv   SQL_INTERVAL_STRUCT
+}
+
+// cellBuf returns the zeroed scratch struct of r. It allocates the struct on first use.
+func (r *Rows) cellBuf() *cellBuf {
+	if r.cell == nil {
+		r.cell = new(cellBuf)
+	} else {
+		*r.cell = cellBuf{}
+	}
+	return r.cell
 }
 
 // newRows creates a new Rows from a statement.
@@ -290,96 +319,89 @@ func (r *Rows) getColumnData(colNum SQLUSMALLINT) (interface{}, error) {
 }
 
 func (r *Rows) getBool(colNum SQLUSMALLINT) (interface{}, error) {
-	var value byte
-	var indicator SQLLEN
-	ret := GetData(r.stmt.stmt, colNum, SQL_C_BIT, uintptr(unsafe.Pointer(&value)), 1, &indicator)
+	c := r.cellBuf()
+	ret := GetData(r.stmt.stmt, colNum, SQL_C_BIT, unsafe.Pointer(&c.u8), 1, &c.ind)
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
 	// Check for NULL - some ODBC drivers return -1 as a 32-bit value that gets
 	// zero-extended to 64-bit (0xFFFFFFFF = 4294967295 instead of -1)
-	if isNullIndicator(indicator) {
+	if isNullIndicator(c.ind) {
 		return nil, nil
 	}
-	return value != 0, nil
+	return c.u8 != 0, nil
 }
 
 func (r *Rows) getInt8(colNum SQLUSMALLINT) (interface{}, error) {
-	var value int8
-	var indicator SQLLEN
-	ret := GetData(r.stmt.stmt, colNum, SQL_C_STINYINT, uintptr(unsafe.Pointer(&value)), 1, &indicator)
+	c := r.cellBuf()
+	ret := GetData(r.stmt.stmt, colNum, SQL_C_STINYINT, unsafe.Pointer(&c.i8), 1, &c.ind)
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if isNullIndicator(indicator) {
+	if isNullIndicator(c.ind) {
 		return nil, nil
 	}
-	return int64(value), nil
+	return int64(c.i8), nil
 }
 
 func (r *Rows) getInt16(colNum SQLUSMALLINT) (interface{}, error) {
-	var value int16
-	var indicator SQLLEN
-	ret := GetData(r.stmt.stmt, colNum, SQL_C_SSHORT, uintptr(unsafe.Pointer(&value)), 2, &indicator)
+	c := r.cellBuf()
+	ret := GetData(r.stmt.stmt, colNum, SQL_C_SSHORT, unsafe.Pointer(&c.i16), 2, &c.ind)
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if isNullIndicator(indicator) {
+	if isNullIndicator(c.ind) {
 		return nil, nil
 	}
-	return int64(value), nil
+	return int64(c.i16), nil
 }
 
 func (r *Rows) getInt32(colNum SQLUSMALLINT) (interface{}, error) {
-	var value int32
-	var indicator SQLLEN
-	ret := GetData(r.stmt.stmt, colNum, SQL_C_SLONG, uintptr(unsafe.Pointer(&value)), 4, &indicator)
+	c := r.cellBuf()
+	ret := GetData(r.stmt.stmt, colNum, SQL_C_SLONG, unsafe.Pointer(&c.i32), 4, &c.ind)
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if isNullIndicator(indicator) {
+	if isNullIndicator(c.ind) {
 		return nil, nil
 	}
-	return int64(value), nil
+	return int64(c.i32), nil
 }
 
 func (r *Rows) getInt64(colNum SQLUSMALLINT) (interface{}, error) {
-	var value int64
-	var indicator SQLLEN
-	ret := GetData(r.stmt.stmt, colNum, SQL_C_SBIGINT, uintptr(unsafe.Pointer(&value)), 8, &indicator)
+	c := r.cellBuf()
+	ret := GetData(r.stmt.stmt, colNum, SQL_C_SBIGINT, unsafe.Pointer(&c.i64), 8, &c.ind)
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if isNullIndicator(indicator) {
+	if isNullIndicator(c.ind) {
 		return nil, nil
 	}
-	return value, nil
+	return c.i64, nil
 }
 
 func (r *Rows) getFloat32(colNum SQLUSMALLINT) (interface{}, error) {
-	var value float32
-	var indicator SQLLEN
-	ret := GetData(r.stmt.stmt, colNum, SQL_C_FLOAT, uintptr(unsafe.Pointer(&value)), 4, &indicator)
+	c := r.cellBuf()
+	ret := GetData(r.stmt.stmt, colNum, SQL_C_FLOAT, unsafe.Pointer(&c.f32), 4, &c.ind)
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if isNullIndicator(indicator) {
+	if isNullIndicator(c.ind) {
 		return nil, nil
 	}
-	return float64(value), nil
+	return float64(c.f32), nil
 }
 
 func (r *Rows) getFloat64(colNum SQLUSMALLINT) (interface{}, error) {
-	var value float64
-	var indicator SQLLEN
-	ret := GetData(r.stmt.stmt, colNum, SQL_C_DOUBLE, uintptr(unsafe.Pointer(&value)), 8, &indicator)
+	c := r.cellBuf()
+	ret := GetData(r.stmt.stmt, colNum, SQL_C_DOUBLE, unsafe.Pointer(&c.f64), 8, &c.ind)
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if isNullIndicator(indicator) {
+	if isNullIndicator(c.ind) {
 		return nil, nil
 	}
-	return value, nil
+	return c.f64, nil
 }
 
 func (r *Rows) getString(colNum SQLUSMALLINT, colSize SQLULEN) (interface{}, error) {
@@ -393,20 +415,20 @@ func (r *Rows) getString(colNum SQLUSMALLINT, colSize SQLULEN) (interface{}, err
 	}
 
 	buf := make([]byte, bufSize)
-	var indicator SQLLEN
+	ind := &r.cellBuf().ind
 
-	ret := GetData(r.stmt.stmt, colNum, SQL_C_CHAR, uintptr(unsafe.Pointer(&buf[0])), SQLLEN(len(buf)), &indicator)
+	ret := GetData(r.stmt.stmt, colNum, SQL_C_CHAR, unsafe.Pointer(&buf[0]), SQLLEN(len(buf)), ind)
 	if !IsSuccess(ret) && ret != SQL_SUCCESS_WITH_INFO {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if isNullIndicator(indicator) {
+	if isNullIndicator(*ind) {
 		return nil, nil
 	}
 
 	// Handle data truncation - need larger buffer
-	if ret == SQL_SUCCESS_WITH_INFO && indicator > SQLLEN(len(buf)-1) {
+	if ret == SQL_SUCCESS_WITH_INFO && *ind > SQLLEN(len(buf)-1) {
 		// Reallocate and fetch remaining data
-		totalLen := int(indicator)
+		totalLen := int(*ind)
 		result := make([]byte, 0, totalLen)
 		result = append(result, buf[:len(buf)-1]...) // Already fetched (minus null terminator)
 
@@ -421,14 +443,14 @@ func (r *Rows) getString(colNum SQLUSMALLINT, colSize SQLULEN) (interface{}, err
 			if chunkSize > len(buf) {
 				chunkSize = len(buf)
 			}
-			ret = GetData(r.stmt.stmt, colNum, SQL_C_CHAR, uintptr(unsafe.Pointer(&buf[0])), SQLLEN(chunkSize), &indicator)
+			ret = GetData(r.stmt.stmt, colNum, SQL_C_CHAR, unsafe.Pointer(&buf[0]), SQLLEN(chunkSize), ind)
 			if !IsSuccess(ret) && ret != SQL_SUCCESS_WITH_INFO {
 				break
 			}
-			if ret == SQL_NO_DATA || isNullIndicator(indicator) {
+			if ret == SQL_NO_DATA || isNullIndicator(*ind) {
 				break
 			}
-			copyLen := int(indicator)
+			copyLen := int(*ind)
 			if copyLen > chunkSize-1 {
 				copyLen = chunkSize - 1
 			}
@@ -439,8 +461,8 @@ func (r *Rows) getString(colNum SQLUSMALLINT, colSize SQLULEN) (interface{}, err
 	}
 
 	// Normal case - data fit in buffer
-	if indicator >= 0 && int(indicator) < len(buf) {
-		return string(buf[:indicator]), nil
+	if *ind >= 0 && int(*ind) < len(buf) {
+		return string(buf[:*ind]), nil
 	}
 	// Find null terminator
 	for i, b := range buf {
@@ -462,19 +484,19 @@ func (r *Rows) getBytes(colNum SQLUSMALLINT, colSize SQLULEN) (interface{}, erro
 	}
 
 	buf := make([]byte, bufSize)
-	var indicator SQLLEN
+	ind := &r.cellBuf().ind
 
-	ret := GetData(r.stmt.stmt, colNum, SQL_C_BINARY, uintptr(unsafe.Pointer(&buf[0])), SQLLEN(len(buf)), &indicator)
+	ret := GetData(r.stmt.stmt, colNum, SQL_C_BINARY, unsafe.Pointer(&buf[0]), SQLLEN(len(buf)), ind)
 	if !IsSuccess(ret) && ret != SQL_SUCCESS_WITH_INFO {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if isNullIndicator(indicator) {
+	if isNullIndicator(*ind) {
 		return nil, nil
 	}
 
 	// Handle data truncation
-	if ret == SQL_SUCCESS_WITH_INFO && indicator > SQLLEN(len(buf)) {
-		totalLen := int(indicator)
+	if ret == SQL_SUCCESS_WITH_INFO && *ind > SQLLEN(len(buf)) {
+		totalLen := int(*ind)
 		result := make([]byte, 0, totalLen)
 		result = append(result, buf...)
 
@@ -489,14 +511,14 @@ func (r *Rows) getBytes(colNum SQLUSMALLINT, colSize SQLULEN) (interface{}, erro
 			if chunkSize > len(buf) {
 				chunkSize = len(buf)
 			}
-			ret = GetData(r.stmt.stmt, colNum, SQL_C_BINARY, uintptr(unsafe.Pointer(&buf[0])), SQLLEN(chunkSize), &indicator)
+			ret = GetData(r.stmt.stmt, colNum, SQL_C_BINARY, unsafe.Pointer(&buf[0]), SQLLEN(chunkSize), ind)
 			if !IsSuccess(ret) && ret != SQL_SUCCESS_WITH_INFO {
 				break
 			}
-			if ret == SQL_NO_DATA || isNullIndicator(indicator) {
+			if ret == SQL_NO_DATA || isNullIndicator(*ind) {
 				break
 			}
-			copyLen := int(indicator)
+			copyLen := int(*ind)
 			if copyLen > chunkSize {
 				copyLen = chunkSize
 			}
@@ -506,52 +528,49 @@ func (r *Rows) getBytes(colNum SQLUSMALLINT, colSize SQLULEN) (interface{}, erro
 		return result, nil
 	}
 
-	if indicator >= 0 && int(indicator) <= len(buf) {
-		return buf[:indicator], nil
+	if *ind >= 0 && int(*ind) <= len(buf) {
+		return buf[:*ind], nil
 	}
 	return buf, nil
 }
 
 func (r *Rows) getDate(colNum SQLUSMALLINT) (interface{}, error) {
-	var date SQL_DATE_STRUCT
-	var indicator SQLLEN
-	ret := GetData(r.stmt.stmt, colNum, SQL_C_DATE, uintptr(unsafe.Pointer(&date)), SQLLEN(unsafe.Sizeof(date)), &indicator)
+	c := r.cellBuf()
+	ret := GetData(r.stmt.stmt, colNum, SQL_C_DATE, unsafe.Pointer(&c.date), SQLLEN(unsafe.Sizeof(c.date)), &c.ind)
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if isNullIndicator(indicator) {
+	if isNullIndicator(c.ind) {
 		return nil, nil
 	}
-	return time.Date(int(date.Year), time.Month(date.Month), int(date.Day), 0, 0, 0, 0, time.UTC), nil
+	return time.Date(int(c.date.Year), time.Month(c.date.Month), int(c.date.Day), 0, 0, 0, 0, time.UTC), nil
 }
 
 func (r *Rows) getTime(colNum SQLUSMALLINT) (interface{}, error) {
-	var t SQL_TIME_STRUCT
-	var indicator SQLLEN
-	ret := GetData(r.stmt.stmt, colNum, SQL_C_TIME, uintptr(unsafe.Pointer(&t)), SQLLEN(unsafe.Sizeof(t)), &indicator)
+	c := r.cellBuf()
+	ret := GetData(r.stmt.stmt, colNum, SQL_C_TIME, unsafe.Pointer(&c.tm), SQLLEN(unsafe.Sizeof(c.tm)), &c.ind)
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if isNullIndicator(indicator) {
+	if isNullIndicator(c.ind) {
 		return nil, nil
 	}
-	return time.Date(0, 1, 1, int(t.Hour), int(t.Minute), int(t.Second), 0, time.UTC), nil
+	return time.Date(0, 1, 1, int(c.tm.Hour), int(c.tm.Minute), int(c.tm.Second), 0, time.UTC), nil
 }
 
 func (r *Rows) getTimestamp(colNum SQLUSMALLINT) (interface{}, error) {
-	var ts SQL_TIMESTAMP_STRUCT
-	var indicator SQLLEN
-	ret := GetData(r.stmt.stmt, colNum, SQL_C_TIMESTAMP, uintptr(unsafe.Pointer(&ts)), SQLLEN(unsafe.Sizeof(ts)), &indicator)
+	c := r.cellBuf()
+	ret := GetData(r.stmt.stmt, colNum, SQL_C_TIMESTAMP, unsafe.Pointer(&c.ts), SQLLEN(unsafe.Sizeof(c.ts)), &c.ind)
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if isNullIndicator(indicator) {
+	if isNullIndicator(c.ind) {
 		return nil, nil
 	}
 	// Fraction is in billionths of a second, convert to nanoseconds
-	nanos := int(ts.Fraction)
-	return time.Date(int(ts.Year), time.Month(ts.Month), int(ts.Day),
-		int(ts.Hour), int(ts.Minute), int(ts.Second), nanos, time.UTC), nil
+	nanos := int(c.ts.Fraction)
+	return time.Date(int(c.ts.Year), time.Month(c.ts.Month), int(c.ts.Day),
+		int(c.ts.Hour), int(c.ts.Minute), int(c.ts.Second), nanos, time.UTC), nil
 }
 
 // getWideString retrieves a wide character (UTF-16) string and converts to UTF-8
@@ -567,20 +586,20 @@ func (r *Rows) getWideString(colNum SQLUSMALLINT, colSize SQLULEN) (interface{},
 
 	// Allocate buffer for UTF-16 data (2 bytes per code unit)
 	buf := make([]uint16, bufSize)
-	var indicator SQLLEN
+	ind := &r.cellBuf().ind
 
-	ret := GetData(r.stmt.stmt, colNum, SQL_C_WCHAR, uintptr(unsafe.Pointer(&buf[0])), SQLLEN(len(buf)*2), &indicator)
+	ret := GetData(r.stmt.stmt, colNum, SQL_C_WCHAR, unsafe.Pointer(&buf[0]), SQLLEN(len(buf)*2), ind)
 	if !IsSuccess(ret) && ret != SQL_SUCCESS_WITH_INFO {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if isNullIndicator(indicator) {
+	if isNullIndicator(*ind) {
 		return nil, nil
 	}
 
 	// Handle data truncation - need larger buffer
-	if ret == SQL_SUCCESS_WITH_INFO && indicator > SQLLEN((len(buf)-1)*2) {
+	if ret == SQL_SUCCESS_WITH_INFO && *ind > SQLLEN((len(buf)-1)*2) {
 		// Reallocate and fetch remaining data
-		totalBytes := int(indicator)
+		totalBytes := int(*ind)
 		totalUnits := totalBytes / 2
 		result := make([]uint16, 0, totalUnits)
 		// Already fetched (minus null terminator)
@@ -598,14 +617,14 @@ func (r *Rows) getWideString(colNum SQLUSMALLINT, colSize SQLULEN) (interface{},
 			if chunkUnits > len(buf) {
 				chunkUnits = len(buf)
 			}
-			ret = GetData(r.stmt.stmt, colNum, SQL_C_WCHAR, uintptr(unsafe.Pointer(&buf[0])), SQLLEN(chunkUnits*2), &indicator)
+			ret = GetData(r.stmt.stmt, colNum, SQL_C_WCHAR, unsafe.Pointer(&buf[0]), SQLLEN(chunkUnits*2), ind)
 			if !IsSuccess(ret) && ret != SQL_SUCCESS_WITH_INFO {
 				break
 			}
-			if ret == SQL_NO_DATA || isNullIndicator(indicator) {
+			if ret == SQL_NO_DATA || isNullIndicator(*ind) {
 				break
 			}
-			copyUnits := int(indicator) / 2
+			copyUnits := int(*ind) / 2
 			if copyUnits > chunkUnits-1 {
 				copyUnits = chunkUnits - 1
 			}
@@ -616,8 +635,8 @@ func (r *Rows) getWideString(colNum SQLUSMALLINT, colSize SQLULEN) (interface{},
 	}
 
 	// Normal case - data fit in buffer
-	if indicator >= 0 {
-		numUnits := int(indicator) / 2
+	if *ind >= 0 {
+		numUnits := int(*ind) / 2
 		if numUnits > len(buf)-1 {
 			numUnits = len(buf) - 1
 		}
@@ -655,54 +674,51 @@ func utf16ToString(u []uint16) string {
 
 // getGUID retrieves a GUID value as a formatted string
 func (r *Rows) getGUID(colNum SQLUSMALLINT) (interface{}, error) {
-	var guid SQL_GUID_STRUCT
-	var indicator SQLLEN
-	ret := GetData(r.stmt.stmt, colNum, SQL_C_GUID, uintptr(unsafe.Pointer(&guid)), SQLLEN(unsafe.Sizeof(guid)), &indicator)
+	c := r.cellBuf()
+	ret := GetData(r.stmt.stmt, colNum, SQL_C_GUID, unsafe.Pointer(&c.guid), SQLLEN(unsafe.Sizeof(c.guid)), &c.ind)
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if isNullIndicator(indicator) {
+	if isNullIndicator(c.ind) {
 		return nil, nil
 	}
-	return guid.String(), nil
+	return c.guid.String(), nil
 }
 
 // getIntervalYearMonth retrieves a year-month interval value
 func (r *Rows) getIntervalYearMonth(colNum SQLUSMALLINT) (interface{}, error) {
-	var is SQL_INTERVAL_STRUCT
-	var indicator SQLLEN
-	ret := GetData(r.stmt.stmt, colNum, SQL_C_INTERVAL_YEAR_TO_MONTH, uintptr(unsafe.Pointer(&is)), SQLLEN(unsafe.Sizeof(is)), &indicator)
+	c := r.cellBuf()
+	ret := GetData(r.stmt.stmt, colNum, SQL_C_INTERVAL_YEAR_TO_MONTH, unsafe.Pointer(&c.iv), SQLLEN(unsafe.Sizeof(c.iv)), &c.ind)
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if isNullIndicator(indicator) {
+	if isNullIndicator(c.ind) {
 		return nil, nil
 	}
 	return IntervalYearMonth{
-		Years:    int(is.YearMonth.Year),
-		Months:   int(is.YearMonth.Month),
-		Negative: is.IntervalSign != 0,
+		Years:    int(c.iv.YearMonth.Year),
+		Months:   int(c.iv.YearMonth.Month),
+		Negative: c.iv.IntervalSign != 0,
 	}, nil
 }
 
 // getIntervalDaySecond retrieves a day-time interval value
 func (r *Rows) getIntervalDaySecond(colNum SQLUSMALLINT) (interface{}, error) {
-	var is SQL_INTERVAL_STRUCT
-	var indicator SQLLEN
-	ret := GetData(r.stmt.stmt, colNum, SQL_C_INTERVAL_DAY_TO_SECOND, uintptr(unsafe.Pointer(&is)), SQLLEN(unsafe.Sizeof(is)), &indicator)
+	c := r.cellBuf()
+	ret := GetData(r.stmt.stmt, colNum, SQL_C_INTERVAL_DAY_TO_SECOND, unsafe.Pointer(&c.iv), SQLLEN(unsafe.Sizeof(c.iv)), &c.ind)
 	if !IsSuccess(ret) {
 		return nil, NewError(SQL_HANDLE_STMT, SQLHANDLE(r.stmt.stmt))
 	}
-	if isNullIndicator(indicator) {
+	if isNullIndicator(c.ind) {
 		return nil, nil
 	}
 	return IntervalDaySecond{
-		Days:        int(is.DaySecond.Day),
-		Hours:       int(is.DaySecond.Hour),
-		Minutes:     int(is.DaySecond.Minute),
-		Seconds:     int(is.DaySecond.Second),
-		Nanoseconds: int(is.DaySecond.Fraction),
-		Negative:    is.IntervalSign != 0,
+		Days:        int(c.iv.DaySecond.Day),
+		Hours:       int(c.iv.DaySecond.Hour),
+		Minutes:     int(c.iv.DaySecond.Minute),
+		Seconds:     int(c.iv.DaySecond.Second),
+		Nanoseconds: int(c.iv.DaySecond.Fraction),
+		Negative:    c.iv.IntervalSign != 0,
 	}, nil
 }
 

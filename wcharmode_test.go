@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"reflect"
 	"testing"
+	"unsafe"
 )
 
 func TestParseWCharMode(t *testing.T) {
@@ -56,7 +57,7 @@ func TestConnGetInfoString(t *testing.T) {
 
 	ret := SQL_SUCCESS
 	var calls []SQLSMALLINT
-	sqlGetInfo = func(dbc SQLHDBC, infoType SQLUSMALLINT, infoValue uintptr, bufLen SQLSMALLINT, strLen *SQLSMALLINT) SQLRETURN {
+	sqlGetInfo = func(dbc SQLHDBC, infoType SQLUSMALLINT, infoValue unsafe.Pointer, bufLen SQLSMALLINT, strLen *SQLSMALLINT) SQLRETURN {
 		calls = append(calls, bufLen)
 		if ret != SQL_SUCCESS {
 			return ret
@@ -166,7 +167,7 @@ func TestRowsWideColumnCharMode(t *testing.T) {
 
 	var gotType SQLSMALLINT
 	var gotLen SQLLEN
-	sqlGetData = func(stmt SQLHSTMT, col SQLUSMALLINT, ctype SQLSMALLINT, target uintptr, bufLen SQLLEN, ind *SQLLEN) SQLRETURN {
+	sqlGetData = func(stmt SQLHSTMT, col SQLUSMALLINT, ctype SQLSMALLINT, target unsafe.Pointer, bufLen SQLLEN, ind *SQLLEN) SQLRETURN {
 		gotType, gotLen = ctype, bufLen
 		if ctype == SQL_C_CHAR {
 			const val = "é日😀"
@@ -221,7 +222,7 @@ func TestStmtBindParamCharMode(t *testing.T) {
 
 	var valueType, paramType SQLSMALLINT
 	var bufLen SQLLEN
-	sqlBindParameter = func(stmt SQLHSTMT, n SQLUSMALLINT, io, vt, pt SQLSMALLINT, colSize SQLULEN, dec SQLSMALLINT, p uintptr, bl SQLLEN, ind *SQLLEN) SQLRETURN {
+	sqlBindParameter = func(stmt SQLHSTMT, n SQLUSMALLINT, io, vt, pt SQLSMALLINT, colSize SQLULEN, dec SQLSMALLINT, p unsafe.Pointer, bl SQLLEN, ind *SQLLEN) SQLRETURN {
 		valueType, paramType, bufLen = vt, pt, bl
 		return SQL_SUCCESS
 	}
@@ -230,8 +231,8 @@ func TestStmtBindParamCharMode(t *testing.T) {
 	if err := s.bindParam(1, "é日😀"); err != nil {
 		t.Fatal(err)
 	}
-	if valueType != SQL_C_CHAR || paramType != SQL_VARCHAR || bufLen != 10 || s.paramLengths[0] != 9 {
-		t.Errorf("char: valueType %d paramType %d bufLen %d len %d", valueType, paramType, bufLen, s.paramLengths[0])
+	if valueType != SQL_C_CHAR || paramType != SQL_VARCHAR || bufLen != 10 || *s.paramLengths[0] != 9 {
+		t.Errorf("char: valueType %d paramType %d bufLen %d len %d", valueType, paramType, bufLen, *s.paramLengths[0])
 	}
 
 	s = &Stmt{conn: &Conn{wcharMode: wcharModeUTF16}}
